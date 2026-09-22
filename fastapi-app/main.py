@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -19,6 +20,7 @@ class TodoIn(BaseModel):                         # 클라이언트가 보내는 
     title: str = Field(min_length=1, max_length=100)
     description: str = ""
     completed: bool = False
+    due_date: date | None = None                 # v2.0.0: 마감일 (없으면 null)
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
@@ -31,7 +33,7 @@ def load_todos() -> list[TodoItem]:
 
 
 def save_todos(todos: list[TodoItem]) -> None:
-    data = json.dumps([t.model_dump() for t in todos], indent=2, ensure_ascii=False)
+    data = json.dumps([t.model_dump(mode="json") for t in todos], indent=2, ensure_ascii=False)
     TODO_FILE.write_text(data, encoding="utf-8")
 
 
