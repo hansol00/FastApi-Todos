@@ -15,8 +15,13 @@ BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 TODO_FILE = BASE_DIR / "todo.json"
 INDEX_FILE = BASE_DIR / "templates" / "index.html"
 
-if not TODO_FILE.exists():                       # 없으면 빈 목록으로 만들어 둔다
-    TODO_FILE.write_text("[]", encoding="utf-8")
+def ensure_todo_file() -> None:
+    """데이터 파일이 없으면 빈 목록으로 만들어 둔다."""
+    if not TODO_FILE.exists():
+        TODO_FILE.write_text("[]", encoding="utf-8")
+
+
+ensure_todo_file()                               # 앱 기동 시 1회
 
 app = FastAPI(title="To-Do List API", version=APP_VERSION)
 

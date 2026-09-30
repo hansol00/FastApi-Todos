@@ -7,3 +7,8 @@ __pycache__/
 myenv/
 fastapi-app/todo.json
 fastapi-app/app.log
+.pytest_cache/
+.coverage
+htmlcov/
+pytest_report/
+venv/

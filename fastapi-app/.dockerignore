@@ -7,3 +7,8 @@ venv/
 .env
 Dockerfile
 .dockerignore
+tests/
+pyproject.toml
+.pytest_cache/
+htmlcov/
+.coverage
