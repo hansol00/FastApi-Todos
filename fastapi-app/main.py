@@ -1,10 +1,15 @@
 import json
-from datetime import date
+import os
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+APP_VERSION = "3.0.0"                            # v3.0.0: 헬스체크에서 노출하는 앱 버전
+STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 TODO_FILE = BASE_DIR / "todo.json"
@@ -13,7 +18,7 @@ INDEX_FILE = BASE_DIR / "templates" / "index.html"
 if not TODO_FILE.exists():                       # 없으면 빈 목록으로 만들어 둔다
     TODO_FILE.write_text("[]", encoding="utf-8")
 
-app = FastAPI(title="To-Do List API")
+app = FastAPI(title="To-Do List API", version=APP_VERSION)
 
 
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
@@ -72,6 +77,34 @@ def delete_todo(todo_id: int) -> None:
     todos = load_todos()
     del todos[find_index(todos, todo_id)]
     save_todos(todos)
+
+
+@app.get("/health")                              # v3.0.0: 헬스체크 — 컨테이너/로드밸런서가 상태를 확인
+def health_check() -> JSONResponse:
+    """서비스가 실제로 일할 수 있는 상태인지 점검한다.
+
+    프로세스가 떠 있다는 사실만으로는 정상이라고 볼 수 없으므로,
+    데이터 파일을 실제로 읽고 쓸 수 있는지까지 확인한 뒤 상태를 돌려준다.
+    정상이면 200 OK("ok"), 데이터 저장소에 문제가 있으면 503("degraded").
+    """
+    body = {
+        "status": "ok",
+        "version": APP_VERSION,
+        "uptime_seconds": round(time.monotonic() - STARTED_AT, 1),
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    try:
+        todos = load_todos()                     # 읽기 가능 여부 확인
+        if not os.access(TODO_FILE, os.W_OK):    # 쓰기 권한 확인
+            raise PermissionError(f"{TODO_FILE.name} is not writable")
+        body["storage"] = "ok"
+        body["todo_count"] = len(todos)
+    except Exception as exc:                     # 저장소 이상 → 트래픽을 받으면 안 되는 상태
+        body["status"] = "degraded"
+        body["storage"] = "error"
+        body["detail"] = f"{type(exc).__name__}: {exc}"
+        return JSONResponse(body, status_code=503)
+    return JSONResponse(body, status_code=200)
 
 
 @app.get("/", include_in_schema=False)           # 화면 서빙

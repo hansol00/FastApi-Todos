@@ -19,10 +19,18 @@
         #toolbar button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
         #count { margin-left: auto; color: #555; }
         #error { color: #b00020; }
+        #health { font-size: .8em; color: #555; border: 1px solid #ddd; border-radius: 999px;
+                  padding: .15rem .6rem; display: inline-flex; align-items: center; gap: .35rem; }
+        #health .dot { width: .55rem; height: .55rem; border-radius: 50%; background: #bbb; }
+        #health.ok .dot { background: #1a7f37; }
+        #health.bad .dot { background: #b00020; }
+        #health.bad { color: #b00020; border-color: #f3c2c2; }
     </style>
 </head>
 <body>
-    <h1>To-Do List <small style="font-size:.5em;color:#888">v2.0.0</small></h1>
+    <h1>To-Do List <small style="font-size:.5em;color:#888">v3.0.0</small>
+        <span id="health" title="/health 응답"><span class="dot"></span><span id="health-text">확인 중…</span></span>
+    </h1>
     <form id="todo-form">
         <input type="text" id="title" placeholder="제목 (예: 20231234)" required>
         <input type="text" id="description" placeholder="설명 (예: 홍길동)">
@@ -139,7 +147,25 @@
           });
         };
 
+        // v3.0.0: /health 를 주기적으로 호출해 서버 상태를 배지로 표시
+        async function checkHealth() {
+          const badge = $("health"), label = $("health-text");
+          try {
+            const res = await fetch("/health", { cache: "no-store" });
+            const info = await res.json();
+            badge.className = res.ok ? "ok" : "bad";
+            label.textContent = res.ok
+              ? `정상 · v${info.version} · ${Math.round(info.uptime_seconds)}s`
+              : `이상 (${info.storage ?? "unknown"})`;
+          } catch {
+            badge.className = "bad";
+            label.textContent = "서버 응답 없음";
+          }
+        }
+
         load();
+        checkHealth();
+        setInterval(checkHealth, 15000);
     </script>
 </body>
 </html>
