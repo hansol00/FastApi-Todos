@@ -8,15 +8,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-APP_VERSION = "3.0.0"                            # v3.0.0: 헬스체크에서 노출하는 앱 버전
+APP_VERSION = "4.0.0"                            # v4.0.0: 데이터 영속성
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
+# v4.0.0: 데이터 위치를 환경변수로 분리. 컨테이너에서는 볼륨 경로를 주입한다.
+#         미지정 시 기존처럼 main.py 옆에 저장하므로 로컬 실행·테스트는 영향 없음.
+DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR))
 TODO_FILE = BASE_DIR / "todo.json"
 INDEX_FILE = BASE_DIR / "templates" / "index.html"
 
 def ensure_todo_file() -> None:
     """데이터 파일이 없으면 빈 목록으로 만들어 둔다."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)   # v4.0.0: 볼륨 마운트 경로 대비
     if not TODO_FILE.exists():
         TODO_FILE.write_text("[]", encoding="utf-8")
 

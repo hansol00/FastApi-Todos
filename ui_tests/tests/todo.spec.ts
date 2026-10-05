@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { test, expect, type Page, type Locator } from "@playwright/test";
 
-const APP_VERSION = "3.0.0";
+const APP_VERSION = "4.0.0";
 const PAST_DATE = "2020-01-01";
 const FUTURE_DATE = "2099-12-31";
 
