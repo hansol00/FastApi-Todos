@@ -1,0 +1,11 @@
+{
+  "name": "fastapi-todos-ui-tests",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

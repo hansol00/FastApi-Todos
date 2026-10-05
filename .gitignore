@@ -12,3 +12,8 @@ fastapi-app/app.log
 htmlcov/
 pytest_report/
 venv/
+# Playwright UI 테스트
+ui_tests/node_modules/
+ui_tests/playwright-report/
+ui_tests/test-results/
+.playwright-mcp/
