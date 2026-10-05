@@ -15,7 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 # v4.0.0: 데이터 위치를 환경변수로 분리. 컨테이너에서는 볼륨 경로를 주입한다.
 #         미지정 시 기존처럼 main.py 옆에 저장하므로 로컬 실행·테스트는 영향 없음.
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR))
-TODO_FILE = BASE_DIR / "todo.json"
+TODO_FILE = DATA_DIR / "todo.json"
 INDEX_FILE = BASE_DIR / "templates" / "index.html"
 
 def ensure_todo_file() -> None:
