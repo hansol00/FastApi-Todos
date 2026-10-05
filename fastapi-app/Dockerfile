@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # root가 아닌 실행 전용 사용자 생성
 RUN useradd --create-home --uid 10001 appuser \
- && mkdir /app && chown appuser:appuser /app
+ && mkdir -p /app/data \
+ && chown -R appuser:appuser /app
 
 # 작업 디렉토리 설정
 WORKDIR /app
