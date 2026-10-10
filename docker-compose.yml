@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile      # Dockerfile 이름 (생략 가능, 기본값은 'Dockerfile')
     container_name: FastApi-app-011
     ports:
-      - "5011:8000"
+      - "5012:8000"
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
     healthcheck:                  # v3.0.0: /health 응답으로 컨테이너 상태 판정
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
