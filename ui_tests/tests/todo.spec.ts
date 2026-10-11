@@ -30,7 +30,7 @@ async function addTodo(page: Page, todo: { title: string; description?: string; 
   await page.locator("#title").fill(todo.title);
   await page.locator("#description").fill(todo.description ?? "");
   await page.locator("#due_date").fill(todo.due ?? "");
-  await page.getByRole("button", { name: "Add To-Do" }).click();
+  await page.getByRole("button", { name: "할 일 추가" }).click();
   await expect(itemOf(page, todo.title)).toBeVisible();
 }
 
@@ -135,14 +135,14 @@ test("빈 제목으로 Add — 추가되지 않음", async ({ page }) => {
 
   // 1) 완전히 빈 제목: required 속성 때문에 브라우저가 제출 자체를 막는다
   await page.locator("#description").fill(tag);
-  await page.getByRole("button", { name: "Add To-Do" }).click();
+  await page.getByRole("button", { name: "할 일 추가" }).click();
   expect(await page.locator("#title").evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
   await page.waitForTimeout(500);                  // 요청이 나가지 않는다는 것을 확인할 여유
   expect(posts).toBe(0);
 
   // 2) 공백만 있는 제목: 화면이 trim 후 보내므로 서버가 422로 거절한다
   await page.locator("#title").fill("   ");
-  await page.getByRole("button", { name: "Add To-Do" }).click();
+  await page.getByRole("button", { name: "할 일 추가" }).click();
   await expect(page.locator("#error")).toBeVisible();
   await expect(page.locator("#error")).toContainText("추가 실패: 422");
 

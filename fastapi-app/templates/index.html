@@ -5,54 +5,253 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>To-Do List</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
-        form { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-        input[type="text"] { flex: 1 1 12rem; padding: .5rem; }
-        ul { list-style: none; padding: 0; }
-        li { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #e5e5e5; }
-        li span { flex: 1; }
-        .done { text-decoration: line-through; color: #888; }
-        .overdue { color: #b00020; font-weight: 600; }
-        .due { font-size: .85em; color: #666; margin-left: .4rem; }
-        .overdue .due { color: #b00020; }
-        #toolbar { display: flex; align-items: center; gap: .5rem; margin-bottom: .5rem; }
-        #toolbar button[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
-        #count { margin-left: auto; color: #555; }
-        #error { color: #b00020; }
-        #health { font-size: .8em; color: #555; border: 1px solid #ddd; border-radius: 999px;
-                  padding: .15rem .6rem; display: inline-flex; align-items: center; gap: .35rem; }
-        #health .dot { width: .55rem; height: .55rem; border-radius: 50%; background: #bbb; }
-        #health.ok .dot { background: #1a7f37; }
-        #health.bad .dot { background: #b00020; }
-        #health.bad { color: #b00020; border-color: #f3c2c2; }
+        :root {
+            --paper:     #FAF8FF;   /* 배경 — 아주 옅은 보라빛 흰색 */
+            --card:      #FFFFFF;
+            --ink:       #332C45;   /* 본문 — 깊은 자두빛 */
+            --ink-soft:  #7A7190;   /* 보조 텍스트 */
+            --lilac:     #C9BCF0;   /* 진행 중 */
+            --lilac-dim: #EDE8FB;
+            --mint:      #8FD3BB;   /* 완료 */
+            --coral:     #F08A72;   /* 기한 지남 */
+            --coral-dim: #FDEDE8;
+            --line:      #EDE8F7;
+            --radius:    14px;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: Pretendard, "Pretendard Variable", -apple-system,
+                         "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+            background: var(--paper);
+            color: var(--ink);
+            max-width: 42rem;
+            margin: 0 auto;
+            padding: 2.5rem 1.25rem 4rem;
+            line-height: 1.55;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ── 머리말 ─────────────────────────────── */
+        header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+        h1 {
+            font-size: 1.9rem;
+            font-weight: 700;
+            letter-spacing: -.02em;
+            margin: 0;
+        }
+        #version { font-size: .8rem; font-weight: 500; color: var(--ink-soft); }
+        #health {
+            margin-left: auto;
+            font-size: .78rem;
+            color: var(--ink-soft);
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            padding: .2rem .7rem;
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            white-space: nowrap;
+        }
+        #health .dot { width: .5rem; height: .5rem; border-radius: 50%; background: #CFC9DB; }
+        #health.ok  .dot { background: var(--mint); }
+        #health.bad .dot { background: var(--coral); }
+        #health.bad { color: var(--coral); border-color: var(--coral-dim); }
+
+        /* ── 진행 상황 ──────────────────────────── */
+        #progress {
+            margin: 1.5rem 0 .9rem;
+            height: .6rem;
+            border-radius: 999px;
+            background: var(--lilac-dim);
+            overflow: hidden;
+            display: flex;
+        }
+        #progress span { height: 100%; transition: width .35s ease; }
+        #bar-done    { background: var(--mint); }
+        #bar-overdue { background: var(--coral); }
+
+        #stats { display: flex; gap: 2.25rem; margin-bottom: 2.1rem; }
+        #stats div { display: flex; flex-direction: column; }
+        #stats b { font-size: 1.45rem; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+        #stats small { font-size: .78rem; color: var(--ink-soft); }
+        #stats .done b    { color: #4FA98A; }
+        #stats .overdue b { color: var(--coral); }
+        #count {
+            display: block;
+            font-size: .82rem;
+            color: var(--ink-soft);
+            margin-top: -1.3rem;
+            margin-bottom: 1.6rem;
+        }
+
+        /* ── 입력 ───────────────────────────────── */
+        form {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: .9rem;
+            display: flex;
+            gap: .5rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+        input[type="text"], input[type="date"] {
+            font: inherit;
+            font-size: .92rem;
+            color: var(--ink);
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            padding: .55rem .7rem;
+        }
+        input[type="text"] { flex: 1 1 11rem; min-width: 0; }
+        input[type="date"] { flex: 0 1 auto; color: var(--ink-soft); }
+        input::placeholder { color: #ADA5C0; }
+        input:focus-visible, button:focus-visible {
+            outline: 2px solid var(--lilac);
+            outline-offset: 1px;
+        }
+        form button {
+            font: inherit;
+            font-weight: 600;
+            font-size: .92rem;
+            color: var(--ink);
+            background: var(--lilac);
+            border: none;
+            border-radius: 9px;
+            padding: .55rem 1.1rem;
+            cursor: pointer;
+        }
+        form button:hover { background: #BBAAEC; }
+
+        /* ── 필터 ───────────────────────────────── */
+        #toolbar { display: flex; gap: .4rem; margin-bottom: .75rem; }
+        #toolbar button {
+            font: inherit;
+            font-size: .85rem;
+            color: var(--ink-soft);
+            background: none;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            padding: .3rem .85rem;
+            cursor: pointer;
+        }
+        #toolbar button:hover { color: var(--ink); }
+        #toolbar button[aria-pressed="true"] {
+            color: var(--ink);
+            font-weight: 600;
+            background: var(--card);
+            border-color: var(--line);
+        }
+
+        /* ── 목록 ───────────────────────────────── */
+        ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
+        li {
+            display: flex;
+            align-items: center;
+            gap: .7rem;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-left: 4px solid var(--lilac);
+            border-radius: var(--radius);
+            padding: .7rem .9rem;
+        }
+        li.is-done    { border-left-color: var(--mint); }
+        li.is-overdue { border-left-color: var(--coral); background: var(--coral-dim); }
+
+        li input[type="checkbox"] {
+            width: 1.05rem; height: 1.05rem;
+            accent-color: #4FA98A;
+            flex: none;
+            cursor: pointer;
+        }
+        li span { flex: 1; min-width: 0; font-size: .95rem; }
+        .done { text-decoration: line-through; color: var(--ink-soft); }
+        .overdue { color: #C85B42; font-weight: 600; }
+        .due {
+            display: inline-block;
+            margin-left: .5rem;
+            font-size: .74rem;
+            font-weight: 500;
+            color: var(--ink-soft);
+            background: var(--paper);
+            border-radius: 999px;
+            padding: .1rem .5rem;
+            white-space: nowrap;
+        }
+        .overdue .due { color: #C85B42; background: #FBDDD5; }
+
+        li button {
+            font: inherit;
+            font-size: .8rem;
+            color: var(--ink-soft);
+            background: none;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            padding: .25rem .6rem;
+            cursor: pointer;
+            flex: none;
+        }
+        li button:hover { color: var(--ink); border-color: var(--lilac); }
+
+        #empty { color: var(--ink-soft); font-size: .92rem; padding: 2rem 0; text-align: center; }
+        #error { color: #C85B42; background: var(--coral-dim); border-radius: 9px; padding: .6rem .8rem; font-size: .9rem; }
+
+        @media (max-width: 30rem) {
+            #stats { gap: 1.25rem; }
+            li button { padding: .25rem .45rem; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            #progress span { transition: none; }
+        }
     </style>
 </head>
 <body>
-    <h1>To-Do List <small style="font-size:.5em;color:#888">v3.0.0</small>
+    <header>
+        <h1>To-Do List</h1>
+        <span id="version"></span>
         <span id="health" title="/health 응답"><span class="dot"></span><span id="health-text">확인 중…</span></span>
-    </h1>
+    </header>
+
+    <div id="progress">
+        <span id="bar-done" style="width:0"></span>
+        <span id="bar-overdue" style="width:0"></span>
+    </div>
+    <div id="stats">
+        <div class="done"><b id="stat-done">0</b><small>완료</small></div>
+        <div class="overdue"><b id="stat-overdue">0</b><small>기한 지남</small></div>
+    </div>
+    <span id="count" aria-live="polite"></span>
+
     <form id="todo-form">
-        <input type="text" id="title" placeholder="제목 (예: 20231234)" required>
-        <input type="text" id="description" placeholder="설명 (예: 홍길동)">
+        <input type="text" id="title" placeholder="할 일 (예: 운영체제 과제)" required>
+        <input type="text" id="description" placeholder="설명 (선택)">
         <input type="date" id="due_date" title="마감일 (선택)">
-        <button type="submit">Add To-Do</button>
+        <button type="submit">할 일 추가</button>
     </form>
+
     <div id="toolbar">
         <button data-filter="all" aria-pressed="true">전체</button>
         <button data-filter="active" aria-pressed="false">진행 중</button>
         <button data-filter="done" aria-pressed="false">완료</button>
-        <span id="count"></span>
     </div>
+
     <p id="error" role="alert" hidden></p>
     <ul id="todo-list"></ul>
+    <p id="empty" hidden>아직 등록된 할 일이 없습니다. 위에서 첫 항목을 추가해 보세요.</p>
+
     <script>
         const $ = (id) => document.getElementById(id);
-        const listEl = $("todo-list"), errorEl = $("error"), countEl = $("count");
+        const listEl = $("todo-list"), errorEl = $("error"), countEl = $("count"), emptyEl = $("empty");
         let allTodos = [];      // 서버에서 받은 전체 목록
         let filter = "all";     // all | active | done
 
         // 오늘 날짜를 YYYY-MM-DD(로컬 시간)로 — 마감일 문자열과 바로 비교할 수 있다
         const today = () => new Date().toLocaleDateString("sv-SE");
+        const isOverdue = (t) => !t.completed && t.due_date && t.due_date < today();
 
         async function api(url, method = "GET", body) {
           const res = await fetch(url, body
@@ -79,12 +278,33 @@
           return Object.assign(document.createElement("button"), { textContent: label, onclick });
         }
 
+        // v5.2.0: 전체·완료·남은 할 일·기한 지남 집계와 진행 막대
+        function renderStats() {
+          const total = allTodos.length;
+          const done = allTodos.filter((t) => t.completed).length;
+          const overdue = allTodos.filter(isOverdue).length;
+          const left = total - done;
+
+          $("stat-done").textContent = done;
+          $("stat-overdue").textContent = overdue;
+
+          const pct = (n) => (total ? (n / total) * 100 : 0);
+          $("bar-done").style.width = `${pct(done)}%`;
+          $("bar-overdue").style.width = `${pct(overdue)}%`;
+
+          countEl.textContent = `남은 할 일 ${left}개 / 전체 ${total}개`;
+        }
+
         function render() {
-          const remaining = allTodos.filter((t) => !t.completed).length;
-          countEl.textContent = `남은 할 일 ${remaining}개 / 전체 ${allTodos.length}개`;
+          renderStats();
 
           const shown = allTodos.filter((t) =>
             filter === "all" ? true : filter === "done" ? t.completed : !t.completed);
+
+          emptyEl.hidden = shown.length > 0;
+          emptyEl.textContent = allTodos.length === 0
+            ? "아직 등록된 할 일이 없습니다. 위에서 첫 항목을 추가해 보세요."
+            : "이 조건에 해당하는 할 일이 없습니다.";
 
           listEl.replaceChildren(...shown.map((todo) => {
             const check = Object.assign(document.createElement("input"), {
@@ -92,7 +312,7 @@
               checked: todo.completed,
               onchange: () => save(todo.id, { ...todo, completed: check.checked }),
             });
-            const overdue = !todo.completed && todo.due_date && todo.due_date < today();
+            const overdue = isOverdue(todo);
             const text = document.createElement("span");
             text.className = todo.completed ? "done" : overdue ? "overdue" : "";
             // [fix] 설명이 비어 있으면 "—" 구분자를 붙이지 않는다
@@ -105,6 +325,7 @@
               text.append(due);
             }
             const li = document.createElement("li");
+            li.className = todo.completed ? "is-done" : overdue ? "is-overdue" : "";
             li.append(check, text, button("Edit", () => edit(todo)), button("Delete", () => remove(todo.id)));
             return li;
           }));
@@ -154,8 +375,10 @@
             const res = await fetch("/health", { cache: "no-store" });
             const info = await res.json();
             badge.className = res.ok ? "ok" : "bad";
+            // v5.2.0: 버전을 하드코딩하지 않고 /health 응답에서 읽는다
+            if (info.version) $("version").textContent = `v${info.version}`;
             label.textContent = res.ok
-              ? `정상 · v${info.version} · ${Math.round(info.uptime_seconds)}s`
+              ? `정상 · ${Math.round(info.uptime_seconds)}초 가동`
               : `이상 (${info.storage ?? "unknown"})`;
           } catch {
             badge.className = "bad";
