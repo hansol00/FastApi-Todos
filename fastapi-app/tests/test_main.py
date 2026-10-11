@@ -201,21 +201,19 @@ def test_saved_file_is_readable_json():
     assert json.loads(raw)[0]["id"] == 1
 
 
-def test_save_todos_is_atomic():
-    """v5.1.0 (H-1): 교체 직전까지 기존 파일이 온전해야 한다."""
+def test_save_todos_is_atomic(monkeypatch):
+    """v5.1.0 (H-1): 교체가 실패해도 기존 파일이 온전하고 임시 파일이 남지 않아야 한다."""
     save_todos([sample(1, "이전 데이터")])
     original = main.TODO_FILE.read_text(encoding="utf-8")
 
     def fail_replace(src, dst):
         raise OSError("replace failed")
 
-    monkeypatch_target = main.os.replace
-    try:
-        main.os.replace = fail_replace
-        with pytest.raises(OSError):
-            save_todos([sample(2, "새 데이터")])
-    finally:
-        main.os.replace = monkeypatch_target
+    # monkeypatch 는 테스트 종료 시 자동 복원된다 (전역 상태를 직접 건드리지 않음)
+    monkeypatch.setattr(main.os, "replace", fail_replace)
+
+    with pytest.raises(OSError):
+        save_todos([sample(2, "새 데이터")])
 
     # 교체가 실패했으므로 기존 내용이 그대로 남아 있어야 한다
     assert main.TODO_FILE.read_text(encoding="utf-8") == original

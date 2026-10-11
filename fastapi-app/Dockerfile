@@ -9,9 +9,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # root가 아닌 실행 전용 사용자 생성
+# v5.1.0 (docker:S6504): chown 대상을 /app 전체가 아니라 데이터 디렉터리로 한정.
+#         소스까지 appuser 소유로 두면 앱이 침해됐을 때 main.py 자체를 바꿔
+#         지속적인 악성 코드를 심을 수 있다.
 RUN useradd --create-home --uid 10001 appuser \
  && mkdir -p /app/data \
- && chown -R appuser:appuser /app
+ && chown appuser:appuser /app/data
 
 # 작업 디렉토리 설정
 WORKDIR /app
@@ -20,9 +23,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# 소스 복사 (앱이 todo.json을 수정할 수 있도록 소유자를 appuser로 지정)
-COPY --chown=appuser:appuser main.py .
-COPY --chown=appuser:appuser templates/ ./templates/
+# 소스 복사 — root 소유로 두어 appuser 는 읽기만 가능하게 한다.
+# 앱이 쓰는 경로는 DATA_DIR(/app/data) 하나뿐이고, 그 디렉터리만 appuser 소유다.
+COPY main.py .
+COPY templates/ ./templates/
 
 # 이후 명령은 appuser 권한으로 실행
 USER appuser
