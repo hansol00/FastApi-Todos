@@ -212,8 +212,10 @@ def test_save_todos_is_atomic(monkeypatch):
     # monkeypatch 는 테스트 종료 시 자동 복원된다 (전역 상태를 직접 건드리지 않음)
     monkeypatch.setattr(main.os, "replace", fail_replace)
 
+    # v5.1.0 (python:S5778): 예외를 던질 수 있는 호출이 블록 안에 하나만 있도록 분리
+    new_todos = [sample(2, "새 데이터")]
     with pytest.raises(OSError):
-        save_todos([sample(2, "새 데이터")])
+        save_todos(new_todos)
 
     # 교체가 실패했으므로 기존 내용이 그대로 남아 있어야 한다
     assert main.TODO_FILE.read_text(encoding="utf-8") == original
