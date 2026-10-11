@@ -12,3 +12,7 @@ pyproject.toml
 .pytest_cache/
 htmlcov/
 .coverage
+todo.json
+sonar-project.properties
+coverage.xml
+.scannerwork/

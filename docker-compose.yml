@@ -6,6 +6,10 @@ services:
     container_name: FastApi-app-011
     ports:
       - "5012:8000"
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - todo_data:/app/data
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
     healthcheck:                  # v3.0.0: /health 응답으로 컨테이너 상태 판정
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
@@ -35,6 +39,7 @@ services:
       - /tmp
 
 volumes:                                        # ← 최상위(0칸)로 이동
+  todo_data:
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:
