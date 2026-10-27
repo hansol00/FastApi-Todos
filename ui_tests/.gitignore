@@ -1,0 +1,13 @@
+# Playwright 실행 산출물
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/node_modules/
+# claude CLI가 실행 중 만들 수 있는 로컬 설정 (.claude/agents/는 커밋 대상)
+.claude/settings.local.json
+# heal.sh 산출물
+heal-output.json
+heal-summary.md
+heal-rerun.log
+heal-report.md
