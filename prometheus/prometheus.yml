@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # FastAPI 애플리케이션 메트릭 (/metrics)
+  # 타깃은 docker-compose.yml 의 '서비스 이름:컨테이너 내부 포트'.
+  # container_name(FastApi-app-011)이나 호스트 포트(5012)가 아님에 주의.
+  - job_name: 'fastapi'
+    static_configs:
+      - targets: ['fastapi-app:8000']
+
+  # 호스트 시스템 메트릭 (CPU/메모리/디스크/네트워크)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # 컨테이너별 리소스 사용량 (과제 (4)번)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
