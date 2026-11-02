@@ -9,9 +9,10 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
 from pydantic import BaseModel, Field
 
-APP_VERSION = "5.1.0"                            # v5.1.0: 정적분석 발견사항 개선
+APP_VERSION = "6.0.0"                            # v6.0.0: Prometheus/Grafana 모니터링
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
@@ -38,6 +39,15 @@ def ensure_todo_file() -> None:
 ensure_todo_file()                               # 앱 기동 시 1회
 
 app = FastAPI(title="To-Do List API", version=APP_VERSION)
+
+# v6.0.0: 요청 수·응답 시간을 자동 수집해 /metrics 로 공개한다 (Prometheus 가 수집).
+#   excluded_handlers: /metrics 자신과 헬스체크(30초마다 호출)를 집계에서 빼
+#   실제 사용자 트래픽만 그래프에 남도록 한다.
+#   should_group_status_codes: 200/201/204 를 "2xx" 로 묶는다 (과제 PromQL 기준).
+Instrumentator(
+    should_group_status_codes=True,
+    excluded_handlers=["/metrics", "/health"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
