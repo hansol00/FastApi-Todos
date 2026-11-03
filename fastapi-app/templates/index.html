@@ -140,6 +140,11 @@
             cursor: pointer;
         }
         #toolbar button:hover { color: var(--ink); }
+        #search {
+          margin-left: auto; min-width: 11rem; padding: .3rem .55rem;
+          border: 1px solid var(--line); border-radius: 6px;
+          background: transparent; color: var(--ink); font: inherit;
+        }
         #toolbar button[aria-pressed="true"] {
             color: var(--ink);
             font-weight: 600;
@@ -237,6 +242,8 @@
         <button data-filter="all" aria-pressed="true">전체</button>
         <button data-filter="active" aria-pressed="false">진행 중</button>
         <button data-filter="done" aria-pressed="false">완료</button>
+        <input type="search" id="search" placeholder="검색 (제목·설명)"
+               autocomplete="off" aria-label="할 일 검색">
     </div>
 
     <p id="error" role="alert" hidden></p>
@@ -248,6 +255,7 @@
         const listEl = $("todo-list"), errorEl = $("error"), countEl = $("count"), emptyEl = $("empty");
         let allTodos = [];      // 서버에서 받은 전체 목록
         let filter = "all";     // all | active | done
+        let query = "";         // v6.0.0: 검색어 (서버에 ?q= 로 전달)
 
         // 오늘 날짜를 YYYY-MM-DD(로컬 시간)로 — 마감일 문자열과 바로 비교할 수 있다
         const today = () => new Date().toLocaleDateString("sv-SE");
@@ -271,7 +279,12 @@
           }
         }
 
-        const load = () => run("목록 불러오기", async () => { allTodos = await api("/todos"); render(); });
+        // v6.0.0: 검색어가 있으면 서버에서 걸러 받는다 (GET /todos?q=...)
+        const load = () => run("목록 불러오기", async () => {
+          const qs = query ? `?q=${encodeURIComponent(query)}` : "";
+          allTodos = await api(`/todos${qs}`);
+          render();
+        });
         const save = (id, todo) => run("수정", async () => { await api(`/todos/${id}`, "PUT", todo); await load(); });
 
         function button(label, onclick) {
@@ -345,6 +358,14 @@
           if (!confirm("정말 삭제할까요?")) return;
           run("삭제", async () => { await api(`/todos/${id}`, "DELETE"); await load(); });
         }
+
+        // v6.0.0: 입력이 멈춘 뒤에만 요청해 타이핑마다 호출되는 것을 막는다
+        let searchTimer;
+        $("search").addEventListener("input", (event) => {
+          query = event.target.value.trim();
+          clearTimeout(searchTimer);
+          searchTimer = setTimeout(load, 250);
+        });
 
         document.querySelectorAll("#toolbar button").forEach((btn) => {
           btn.onclick = () => {

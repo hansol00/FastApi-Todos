@@ -7,7 +7,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
 from pydantic import BaseModel, Field
@@ -99,9 +99,31 @@ def find_index(todos: list[TodoItem], todo_id: int) -> int:
     raise HTTPException(404, "To-Do item not found")
 
 
-@app.get("/todos")                               # 목록 조회
-def get_todos() -> list[TodoItem]:
-    return load_todos()
+@app.get("/todos")                               # 목록 조회 — v6.0.0: 검색·상태 필터
+def get_todos(
+    q: str | None = Query(
+        default=None,
+        max_length=100,                          # 길이 제한 (OWASP A04, CWE-770)
+        description="제목·설명 부분 일치 검색어 (대소문자 무시)",
+    ),
+    completed: bool | None = Query(
+        default=None, description="완료 여부로 거르기. 생략하면 전체"
+    ),
+) -> list[TodoItem]:
+    """검색어와 완료 여부로 목록을 거른다.
+
+    v6.0.0: 두 파라미터 모두 선택적이라 기존 `GET /todos` 동작은 그대로다.
+    casefold() 는 lower() 보다 넓은 범위의 대소문자를 정규화한다.
+    """
+    todos = load_todos()
+    if q and (needle := q.strip().casefold()):
+        todos = [
+            t for t in todos
+            if needle in t.title.casefold() or needle in t.description.casefold()
+        ]
+    if completed is not None:
+        todos = [t for t in todos if t.completed is completed]
+    return todos
 
 
 @app.post("/todos", status_code=201)             # 추가 — id 는 서버가 매긴다

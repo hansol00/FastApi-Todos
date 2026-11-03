@@ -279,3 +279,61 @@ def test_ensure_todo_file_keeps_existing_data():
     main.TODO_FILE.write_text('[{"id": 1, "title": "기존 데이터"}]', encoding="utf-8")
     main.ensure_todo_file()
     assert "기존 데이터" in main.TODO_FILE.read_text(encoding="utf-8")
+
+#검색·필터 (v6.0.0)
+
+@pytest.fixture
+def sample_todos():
+    """검색/필터 테스트용 고정 데이터."""
+    save_todos([
+        TodoItem(id=1, title="운영체제 과제", description="스케줄러 정리", completed=False),
+        TodoItem(id=2, title="장보기", description="우유와 계란", completed=True),
+        TodoItem(id=3, title="Docker 복습", description="compose 명령어", completed=False),
+    ])
+
+
+def test_get_todos_without_filters_returns_all(sample_todos):
+    """파라미터가 없으면 기존처럼 전체를 돌려준다."""
+    assert len(client.get("/todos").json()) == 3
+
+
+def test_search_matches_title(sample_todos):
+    found = client.get("/todos", params={"q": "과제"}).json()
+    assert [t["id"] for t in found] == [1]
+
+
+def test_search_matches_description(sample_todos):
+    """설명에만 있는 단어도 찾는다."""
+    found = client.get("/todos", params={"q": "계란"}).json()
+    assert [t["id"] for t in found] == [2]
+
+
+def test_search_is_case_insensitive(sample_todos):
+    assert [t["id"] for t in client.get("/todos", params={"q": "docker"}).json()] == [3]
+    assert [t["id"] for t in client.get("/todos", params={"q": "DOCKER"}).json()] == [3]
+
+
+def test_search_with_no_match_returns_empty(sample_todos):
+    assert client.get("/todos", params={"q": "없는단어"}).json() == []
+
+
+def test_blank_search_is_ignored(sample_todos):
+    """공백만 입력한 경우는 검색하지 않은 것으로 본다."""
+    assert len(client.get("/todos", params={"q": "   "}).json()) == 3
+
+
+def test_filter_by_completed(sample_todos):
+    assert [t["id"] for t in client.get("/todos", params={"completed": True}).json()] == [2]
+    assert [t["id"] for t in client.get("/todos", params={"completed": False}).json()] == [1, 3]
+
+
+def test_search_and_filter_combined(sample_todos):
+    """검색어와 완료 여부는 함께 적용된다."""
+    assert client.get("/todos", params={"q": "복습", "completed": True}).json() == []
+    assert [t["id"] for t in
+            client.get("/todos", params={"q": "복습", "completed": False}).json()] == [3]
+
+
+def test_search_rejects_too_long_query(sample_todos):
+    """100자를 넘는 검색어는 422로 거부한다."""
+    assert client.get("/todos", params={"q": "ㄱ" * 101}).status_code == 422
