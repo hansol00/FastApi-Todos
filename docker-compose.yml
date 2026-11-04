@@ -21,6 +21,8 @@ services:
       - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
     cap_drop:
       - ALL                       # 불필요한 커널 권한 모두 제거
+    networks:
+      - loadtest-net
 
   sonarqube:
     image: sonarqube:26.9.0.129388-community
@@ -37,6 +39,8 @@ services:
       - sonarqube_temp:/opt/sonarqube/temp
     tmpfs:                                      # ← 추가: /tmp를 쓰기 가능하게
       - /tmp
+    networks:
+      - loadtest-net
 
   prometheus:                                   # ← v6.0.0 추가
     image: prom/prometheus:v3.15.0              # latest 대신 버전 고정
@@ -57,6 +61,8 @@ services:
     restart: unless-stopped
     depends_on:
       - fastapi-app
+    networks:
+      - loadtest-net
 
   grafana:                                      # ← v6.0.0 추가
     image: grafana/grafana:13.2.4               # latest 대신 버전 고정 (보안 패치 버전)
@@ -75,9 +81,15 @@ services:
       - GF_PLUGINS_PREINSTALL_AUTO_UPDATE=false
     volumes:
       - grafana-data:/var/lib/grafana
+      # v7.0.0: InfluxDB 데이터소스를 파일로 등록. UI에서 손으로 추가하면
+      #         컨테이너를 지웠을 때 사라지고, 과제 재현도 안 된다.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
     restart: unless-stopped
     depends_on:
       - prometheus
+      - influxdb
+    networks:
+      - loadtest-net
 
   node-exporter:                                # ← v6.0.0 추가
     image: prom/node-exporter:v1.12.1           # latest 대신 버전 고정
@@ -93,8 +105,10 @@ services:
       - /:/host:ro,rslave                       # 호스트 디스크/네트워크를 실제 값으로 읽기 위함(읽기 전용)
     restart: unless-stopped
     # ports 없음: Prometheus가 내부 네트워크(node-exporter:9100)로만 수집
+    networks:
+      - loadtest-net
 
-  cadvisor:                                     # ← v6.0.0 추가 (과제 (4)번)
+  cadvisor:                                     # ← v6.0.0 추가 (#7 과제 (4)번)
     image: ghcr.io/google/cadvisor:v0.60.6      # v0.53.0부터 배포 위치가 ghcr.io로 변경
     container_name: cadvisor-011
     privileged: true                            # cgroup·컨테이너 정보 수집에 필요 (마운트는 모두 :ro)
@@ -109,6 +123,66 @@ services:
     restart: unless-stopped
     # ports 없음: Prometheus가 내부 네트워크(cadvisor:8080)로만 수집
     #   (공식 예제의 8080:8080은 Jenkins 포트와 충돌하고, cAdvisor 화면에는 로그인 기능이 없음)
+    networks:
+      - loadtest-net
+
+  influxdb:                                     # ← v7.0.0 추가 (과제 (2)번)
+    # JMeter 의 Backend Listener(InfluxdbBackendListenerClient)는 InfluxDB 1.x
+    # 라인 프로토콜(/write?db=...)로 보낸다. 2.x는 토큰 기반 /api/v2/write 라
+    # 같은 리스너로 바로 붙지 않는다. 그래서 1.x 최신 버전을 쓴다.
+    image: influxdb:1.11.8
+    container_name: influxdb-011
+    environment:
+      - INFLUXDB_DB=jmeter                      # 기동 시 jmeter 데이터베이스 자동 생성
+      - INFLUXDB_HTTP_AUTH_ENABLED=false        # 루프백에만 열려 있고 수업용이라 인증 생략
+      - INFLUXDB_REPORTING_DISABLED=true
+    ports:
+      - "127.0.0.1:8086:8086"                   # 외부 노출 금지 (Grafana·JMeter는 내부 네트워크로 접근)
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+    restart: unless-stopped
+    networks:
+      - loadtest-net
+
+  jmeter:                                       # ← v7.0.0 추가 (과제 (1)번 로컬 확인용)
+    # 평소 `docker compose up -d` 에 끼어들지 않도록 profile 로 분리했다.
+    # 실행:  docker compose --profile loadtest run --rm jmeter
+    # (Jenkins 파이프라인은 이 서비스가 아니라 같은 Dockerfile로 만든
+    #  이미지를 직접 띄운다. 아래 TARGET_HOST 는 '같은 compose 안의 앱' 기준.)
+    profiles: ["loadtest"]
+    build:
+      context: ./jmeter
+      dockerfile: Dockerfile
+    container_name: jmeter-011
+    volumes:
+      - ./jmeter:/jmeter
+    command:
+      - jmeter
+      - -n
+      - -t
+      - /jmeter/fastapi_test_plan.jmx
+      - -l
+      - /jmeter/results.jtl
+      - -j
+      - /jmeter/jmeter.log
+      - -JTARGET_HOST=fastapi-app
+      - -JTARGET_PORT=8000
+      - -JINFLUX_URL=http://influxdb-011:8086/write?db=jmeter
+      - -JTEST_TITLE=local compose run
+      - -Jjmeter.save.saveservice.output_format=csv
+      - -e
+      - -o
+      - /jmeter/report
+    depends_on:
+      - fastapi-app
+      - influxdb
+    networks:
+      - loadtest-net
+
+networks:
+  loadtest-net:
+    name: loadtest-net                          # 이름을 고정해야 Jenkins에서
+    driver: bridge                              # `docker run --network loadtest-net` 로 붙을 수 있다
 
 volumes:                                        # ← 최상위(0칸)로 이동
   todo_data:
@@ -118,3 +192,4 @@ volumes:                                        # ← 최상위(0칸)로 이동
   sonarqube_temp:
   prometheus-data:                              # ← v6.0.0 추가
   grafana-data:                                 # ← v6.0.0 추가
+  influxdb-data:                                # ← v7.0.0 추가

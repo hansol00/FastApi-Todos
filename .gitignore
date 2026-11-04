@@ -17,3 +17,7 @@ ui_tests/node_modules/
 ui_tests/playwright-report/
 ui_tests/test-results/
 .playwright-mcp/
+# JMeter 부하 테스트 산출물 (v7.0.0)
+jmeter/report/
+jmeter/results.jtl
+jmeter/jmeter.log
