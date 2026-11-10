@@ -337,3 +337,77 @@ def test_search_and_filter_combined(sample_todos):
 def test_search_rejects_too_long_query(sample_todos):
     """100자를 넘는 검색어는 422로 거부한다."""
     assert client.get("/todos", params={"q": "ㄱ" * 101}).status_code == 422
+
+
+#페이지네이션 (v7.0.0)
+
+@pytest.fixture
+def many_todos():
+    """페이지네이션 테스트용 10건."""
+    save_todos([
+        TodoItem(id=i, title=f"항목 {i}", description=f"설명 {i}",
+                 completed=(i % 2 == 0))
+        for i in range(1, 11)
+    ])
+
+
+def test_pagination_omitted_returns_all(many_todos):
+    """limit/offset 을 안 주면 v6.0.0 과 똑같이 전체를 돌려준다."""
+    assert len(client.get("/todos").json()) == 10
+
+
+def test_limit_returns_first_n(many_todos):
+    found = client.get("/todos", params={"limit": 3}).json()
+    assert [t["id"] for t in found] == [1, 2, 3]
+
+
+def test_offset_skips_from_front(many_todos):
+    found = client.get("/todos", params={"offset": 7}).json()
+    assert [t["id"] for t in found] == [8, 9, 10]
+
+
+def test_limit_with_offset_walks_pages(many_todos):
+    """limit 과 offset 을 함께 주면 페이지 단위로 넘어간다."""
+    page1 = client.get("/todos", params={"limit": 4, "offset": 0}).json()
+    page2 = client.get("/todos", params={"limit": 4, "offset": 4}).json()
+    page3 = client.get("/todos", params={"limit": 4, "offset": 8}).json()
+    assert [t["id"] for t in page1] == [1, 2, 3, 4]
+    assert [t["id"] for t in page2] == [5, 6, 7, 8]
+    assert [t["id"] for t in page3] == [9, 10]
+
+
+def test_limit_larger_than_total_is_harmless(many_todos):
+    assert len(client.get("/todos", params={"limit": 100}).json()) == 10
+
+
+def test_offset_past_the_end_returns_empty(many_todos):
+    """마지막 페이지를 넘어가면 404 가 아니라 빈 목록이다."""
+    assert client.get("/todos", params={"offset": 50}).json() == []
+
+
+def test_pagination_applies_after_filters(many_todos):
+    """거르기를 먼저 하고, 그 결과를 자른다."""
+    found = client.get(
+        "/todos", params={"completed": True, "limit": 2}
+    ).json()
+    assert [t["id"] for t in found] == [2, 4]
+
+
+def test_pagination_applies_after_search(many_todos):
+    found = client.get("/todos", params={"q": "항목 1", "limit": 1}).json()
+    assert [t["id"] for t in found] == [1]
+
+
+def test_limit_zero_is_rejected(many_todos):
+    """0건 요청은 의미가 없으므로 422 로 거부한다."""
+    assert client.get("/todos", params={"limit": 0}).status_code == 422
+
+
+def test_limit_above_cap_is_rejected(many_todos):
+    """상한(100)을 넘는 요청은 거부한다 — 요청 하나가 서버를 묶지 못하게."""
+    assert client.get("/todos", params={"limit": 101}).status_code == 422
+
+
+def test_negative_offset_is_rejected(many_todos):
+    """음수 offset 은 파이썬 슬라이스에서 뒤에서부터 세므로 반드시 막아야 한다."""
+    assert client.get("/todos", params={"offset": -1}).status_code == 422

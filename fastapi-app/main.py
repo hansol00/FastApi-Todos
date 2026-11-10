@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
 from pydantic import BaseModel, Field
 
-APP_VERSION = "6.0.0"                            # v6.0.0: Prometheus/Grafana 모니터링
+APP_VERSION = "7.0.0"                            # v7.0.0: JMeter 부하 테스트 + 목록 페이지네이션
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
@@ -109,11 +109,28 @@ def get_todos(
     completed: bool | None = Query(
         default=None, description="완료 여부로 거르기. 생략하면 전체"
     ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=100,                                  # 한 번에 받아갈 수 있는 최대치를 서버가 정한다
+        description="한 번에 돌려줄 최대 개수. 생략하면 전체",
+    ),
+    offset: int = Query(
+        default=0, ge=0, description="건너뛸 개수. limit 과 함께 페이지를 넘긴다"
+    ),
 ) -> list[TodoItem]:
-    """검색어와 완료 여부로 목록을 거른다.
+    """검색어·완료 여부로 거르고, 필요하면 잘라서 돌려준다.
 
-    v6.0.0: 두 파라미터 모두 선택적이라 기존 `GET /todos` 동작은 그대로다.
-    casefold() 는 lower() 보다 넓은 범위의 대소문자를 정규화한다.
+    v6.0.0: 검색(q)과 완료 여부(completed) 필터.
+    v7.0.0: limit/offset 페이지네이션.
+        JMeter 부하 테스트에서 `GET /todos` 가 가장 무거운 요청으로 나왔다.
+        항목이 늘수록 전체를 직렬화해 내려주기 때문에, 응답 시간과 전송량이
+        데이터 건수에 그대로 비례한다. 화면은 한 번에 수십 개만 보여주므로
+        서버가 잘라서 주는 편이 맞다.
+
+        네 파라미터 모두 선택적이라 기존 `GET /todos` 동작은 그대로다.
+        le=100 으로 상한을 둔 것은 거르기 전 전체를 요구하는 요청 하나가
+        서버를 묶어두지 못하게 하기 위함이다 (OWASP A04, CWE-770).
     """
     todos = load_todos()
     if q and (needle := q.strip().casefold()):
@@ -123,6 +140,10 @@ def get_todos(
         ]
     if completed is not None:
         todos = [t for t in todos if t.completed is completed]
+    if offset:
+        todos = todos[offset:]
+    if limit is not None:
+        todos = todos[:limit]
     return todos
 
 
