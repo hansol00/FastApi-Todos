@@ -427,6 +427,7 @@
 
         // v8.0.0: 선택 삭제 ───────────────────────────────────────
         let shownIds = [];      // 지금 화면에 보이는 항목 id (전체 선택 대상)
+        const BULK_LIMIT = 100; // 서버 main.py 의 MAX_BULK_DELETE 와 같은 값
 
         function renderFooter() {
           $("select-mode").hidden = selecting || allTodos.length === 0;
@@ -464,11 +465,20 @@
         $("delete-selected").onclick = () => {
           if (selected.size === 0) return;
           if (!confirm(`선택한 할 일 ${selected.size}개를 삭제할까요?`)) return;
-          // DELETE /todos?ids=1&ids=3 — 서버는 전부 지우거나, 없는 id 가 있으면 하나도 안 지운다
-          const qs = [...selected].map((id) => `ids=${id}`).join("&");
+          // DELETE /todos?ids=1&ids=3 — 서버는 한 요청 안에서 전부 지우거나, 없는 id 가 있으면 하나도 안 지운다.
+          // 서버는 한 번에 최대 BULK_LIMIT 개만 받으므로(초과 시 422), 그보다 많이 고르면 나눠서 보낸다.
+          const ids = [...selected];
+          let done = 0;
           run("선택 항목 삭제", async () => {
             try {
-              await api(`/todos?${qs}`, "DELETE");
+              for (let i = 0; i < ids.length; i += BULK_LIMIT) {
+                const chunk = ids.slice(i, i + BULK_LIMIT);
+                await api(`/todos?${chunk.map((id) => `ids=${id}`).join("&")}`, "DELETE");
+                done += chunk.length;
+              }
+            } catch (e) {
+              // 앞 묶음은 이미 지워졌을 수 있으니 몇 개까지 지웠는지 함께 알린다
+              throw done ? new Error(`${done}개 삭제 후 중단 — ${e.message}`) : e;
             } finally {
               selecting = false;          // 성공·실패 모두 선택 모드를 끝내고 최신 목록을 다시 받는다
               selected = new Set();
