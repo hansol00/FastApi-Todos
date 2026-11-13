@@ -241,6 +241,37 @@ def delete_todo(todo_id: int) -> None:
     logger.info("todo deleted id=%s title=%r", removed.id, removed.title)
 
 
+@app.delete(                                     # v8.0.0: 완료 항목 일괄 삭제
+    "/todos",
+    responses={400: {"description": "completed=true 만 지원"}},
+)
+def delete_completed_todos(
+    completed: bool = Query(
+        description="true 만 허용. 완료된 할 일을 한 번에 지운다",
+    ),
+) -> dict:
+    """완료된 할 일을 한 번에 지우고, 지운 개수와 id 를 돌려준다.
+
+    v8.0.0: 완료 항목이 쌓이면 목록과 `GET /todos` 응답이 같이 커진다
+        (v7.0.0 JMeter 에서 가장 무거웠던 요청). 하나씩 지우면 요청이 N 번 필요하다.
+
+    - `completed` 를 필수로 둔다. 파라미터 없는 `DELETE /todos` 가 '전부 삭제' 로
+      오해되거나 실수로 호출되는 일을 막는다 (없으면 422).
+    - `completed=false`(진행 중 항목 전부 삭제)는 되돌릴 수 없는 위험한 동작이라
+      지원하지 않는다 (400).
+    - 지운 id 를 감사 로그에 남긴다 → Loki 에서 `|= "todos cleared"` 로 이력 조회.
+    """
+    if not completed:
+        raise HTTPException(400, "Only completed=true is supported")
+    with _lock:
+        todos = load_todos()
+        removed = [t.id for t in todos if t.completed]
+        if removed:                              # 지울 게 없으면 파일을 다시 쓰지 않는다
+            save_todos([t for t in todos if not t.completed])
+    logger.info("todos cleared completed count=%d ids=%s", len(removed), removed)
+    return {"deleted": len(removed), "ids": removed}
+
+
 @app.get("/health")                              # v3.0.0: 헬스체크 — 컨테이너/로드밸런서가 상태를 확인
 def health_check() -> JSONResponse:
     """서비스가 실제로 일할 수 있는 상태인지 점검한다.

@@ -152,6 +152,20 @@
             border-color: var(--line);
         }
 
+        /* ── v8.0.0: 완료 항목 일괄 삭제 ─────────── */
+        #list-footer { display: flex; justify-content: flex-end; margin-top: .75rem; }
+        #clear-done {
+            font: inherit;
+            font-size: .85rem;
+            color: #C85B42;
+            background: none;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            padding: .3rem .8rem;
+            cursor: pointer;
+        }
+        #clear-done:hover { border-color: var(--coral); background: var(--coral-dim); }
+
         /* ── 목록 ───────────────────────────────── */
         ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
         li {
@@ -249,6 +263,8 @@
     <p id="error" role="alert" hidden></p>
     <ul id="todo-list"></ul>
     <p id="empty" hidden>아직 등록된 할 일이 없습니다. 위에서 첫 항목을 추가해 보세요.</p>
+    <!-- v8.0.0: 완료 항목이 있을 때만 보인다 -->
+    <div id="list-footer"><button id="clear-done" hidden>완료 항목 지우기</button></div>
 
     <script>
         const $ = (id) => document.getElementById(id);
@@ -311,6 +327,11 @@
         function render() {
           renderStats();
 
+          // v8.0.0: 완료 항목 개수를 버튼에 표시하고, 없으면 숨긴다
+          const doneCount = allTodos.filter((t) => t.completed).length;
+          $("clear-done").hidden = doneCount === 0;
+          $("clear-done").textContent = `완료 항목 지우기 (${doneCount})`;
+
           const shown = allTodos.filter((t) =>
             filter === "all" ? true : filter === "done" ? t.completed : !t.completed);
 
@@ -358,6 +379,20 @@
           if (!confirm("정말 삭제할까요?")) return;
           run("삭제", async () => { await api(`/todos/${id}`, "DELETE"); await load(); });
         }
+
+        // v8.0.0: 완료된 할 일을 한 번에 삭제 (DELETE /todos?completed=true)
+        //   서버는 검색어와 관계없이 '모든' 완료 항목을 지우므로, 검색 중이면 그 사실을 먼저 알린다.
+        $("clear-done").onclick = () => {
+          const doneCount = allTodos.filter((t) => t.completed).length;
+          const message = query
+            ? "검색 결과뿐 아니라 완료된 할 일 전체를 삭제합니다. 계속할까요?"
+            : `완료된 할 일 ${doneCount}개를 삭제할까요?`;
+          if (!confirm(message)) return;
+          run("완료 항목 삭제", async () => {
+            await api("/todos?completed=true", "DELETE");
+            await load();
+          });
+        };
 
         // v6.0.0: 입력이 멈춘 뒤에만 요청해 타이핑마다 호출되는 것을 막는다
         let searchTimer;

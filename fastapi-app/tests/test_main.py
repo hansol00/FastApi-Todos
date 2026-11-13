@@ -415,6 +415,52 @@ def test_negative_offset_is_rejected(many_todos):
     assert client.get("/todos", params={"offset": -1}).status_code == 422
 
 
+#완료 항목 일괄 삭제 (v8.0.0)
+
+def test_delete_completed_removes_only_completed():
+    save_todos([
+        sample(1, completed=True),
+        sample(2),
+        sample(3, completed=True),
+        sample(4),
+    ])
+    response = client.delete("/todos", params={"completed": "true"})
+    assert response.status_code == 200
+    assert response.json() == {"deleted": 2, "ids": [1, 3]}
+    assert [t.id for t in load_todos()] == [2, 4]
+
+
+def test_delete_completed_when_none_completed(monkeypatch):
+    save_todos([sample(1), sample(2)])
+    writes = []
+    monkeypatch.setattr(main, "save_todos", lambda todos: writes.append(todos))
+    response = client.delete("/todos", params={"completed": "true"})
+    assert response.json() == {"deleted": 0, "ids": []}
+    assert writes == []                          # 지울 게 없으면 파일을 다시 쓰지 않는다
+    assert len(load_todos()) == 2
+
+
+def test_delete_completed_false_rejected():
+    save_todos([sample(1), sample(2)])
+    response = client.delete("/todos", params={"completed": "false"})
+    assert response.status_code == 400
+    assert len(load_todos()) == 2                # 진행 중 항목은 그대로
+
+
+def test_delete_todos_without_param_rejected():
+    """파라미터 없는 DELETE /todos 가 '전부 삭제' 로 동작하면 안 된다."""
+    save_todos([sample(1, completed=True)])
+    assert client.delete("/todos").status_code == 422
+    assert len(load_todos()) == 1
+
+
+def test_delete_completed_writes_audit_log(caplog):
+    save_todos([sample(1, completed=True), sample(2), sample(3, completed=True)])
+    with caplog.at_level("INFO", logger="todo"):
+        client.delete("/todos", params={"completed": "true"})
+    assert "todos cleared completed count=2 ids=[1, 3]" in caplog.text
+
+
 #액세스 로그 (v8.0.0, Loki + Alloy)
 
 # Grafana LogQL 의 pattern `<_> - "<method> <path> <_>" <status> <_>` 와 같은 형식
