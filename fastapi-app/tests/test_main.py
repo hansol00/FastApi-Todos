@@ -415,50 +415,49 @@ def test_negative_offset_is_rejected(many_todos):
     assert client.get("/todos", params={"offset": -1}).status_code == 422
 
 
-#완료 항목 일괄 삭제 (v8.0.0)
+#선택 항목 일괄 삭제 (v8.0.0)
 
-def test_delete_completed_removes_only_completed():
-    save_todos([
-        sample(1, completed=True),
-        sample(2),
-        sample(3, completed=True),
-        sample(4),
-    ])
-    response = client.delete("/todos", params={"completed": "true"})
+def test_delete_selected_removes_only_given_ids():
+    save_todos([sample(1), sample(2), sample(3), sample(4)])
+    response = client.delete("/todos", params={"ids": [1, 3]})
     assert response.status_code == 200
     assert response.json() == {"deleted": 2, "ids": [1, 3]}
     assert [t.id for t in load_todos()] == [2, 4]
 
 
-def test_delete_completed_when_none_completed(monkeypatch):
+def test_delete_selected_ignores_duplicate_ids():
     save_todos([sample(1), sample(2)])
-    writes = []
-    monkeypatch.setattr(main, "save_todos", lambda todos: writes.append(todos))
-    response = client.delete("/todos", params={"completed": "true"})
-    assert response.json() == {"deleted": 0, "ids": []}
-    assert writes == []                          # 지울 게 없으면 파일을 다시 쓰지 않는다
-    assert len(load_todos()) == 2
+    response = client.delete("/todos", params={"ids": [2, 2, 2]})
+    assert response.json() == {"deleted": 1, "ids": [2]}
+    assert [t.id for t in load_todos()] == [1]
 
 
-def test_delete_completed_false_rejected():
+def test_delete_selected_with_missing_id_deletes_nothing():
+    """없는 id 가 섞이면 404 — 일부만 지워진 채 남지 않아야 한다."""
     save_todos([sample(1), sample(2)])
-    response = client.delete("/todos", params={"completed": "false"})
-    assert response.status_code == 400
-    assert len(load_todos()) == 2                # 진행 중 항목은 그대로
+    response = client.delete("/todos", params={"ids": [1, 999]})
+    assert response.status_code == 404
+    assert "999" in response.json()["detail"]
+    assert [t.id for t in load_todos()] == [1, 2]
 
 
-def test_delete_todos_without_param_rejected():
+def test_delete_todos_without_ids_rejected():
     """파라미터 없는 DELETE /todos 가 '전부 삭제' 로 동작하면 안 된다."""
-    save_todos([sample(1, completed=True)])
+    save_todos([sample(1)])
     assert client.delete("/todos").status_code == 422
     assert len(load_todos()) == 1
 
 
-def test_delete_completed_writes_audit_log(caplog):
-    save_todos([sample(1, completed=True), sample(2), sample(3, completed=True)])
+def test_delete_selected_rejects_too_many_ids():
+    params = {"ids": list(range(1, main.MAX_BULK_DELETE + 2))}
+    assert client.delete("/todos", params=params).status_code == 422
+
+
+def test_delete_selected_writes_audit_log(caplog):
+    save_todos([sample(1), sample(2), sample(3)])
     with caplog.at_level("INFO", logger="todo"):
-        client.delete("/todos", params={"completed": "true"})
-    assert "todos cleared completed count=2 ids=[1, 3]" in caplog.text
+        client.delete("/todos", params={"ids": [3, 1]})
+    assert "todos deleted count=2 ids=[3, 1]" in caplog.text
 
 
 #액세스 로그 (v8.0.0, Loki + Alloy)

@@ -241,35 +241,41 @@ def delete_todo(todo_id: int) -> None:
     logger.info("todo deleted id=%s title=%r", removed.id, removed.title)
 
 
-@app.delete(                                     # v8.0.0: 완료 항목 일괄 삭제
+MAX_BULK_DELETE = 100                            # v8.0.0: 한 번에 지울 수 있는 최대 개수
+
+
+@app.delete(                                     # v8.0.0: 선택한 항목 일괄 삭제
     "/todos",
-    responses={400: {"description": "completed=true 만 지원"}},
+    responses={404: {"description": "없는 id 가 섞여 있음 (아무것도 지우지 않음)"}},
 )
-def delete_completed_todos(
-    completed: bool = Query(
-        description="true 만 허용. 완료된 할 일을 한 번에 지운다",
+def delete_selected_todos(
+    ids: list[int] = Query(
+        min_length=1,                            # 빈 요청이 '전부 삭제' 로 오해되지 않게 필수
+        max_length=MAX_BULK_DELETE,              # 요청 하나가 서버를 오래 붙잡지 못하게 (OWASP A04, CWE-770)
+        description="지울 할 일 id. 여러 개는 ?ids=1&ids=3 처럼 반복",
     ),
 ) -> dict:
-    """완료된 할 일을 한 번에 지우고, 지운 개수와 id 를 돌려준다.
+    """화면에서 고른 할 일 여러 개를 한 번에 지운다.
 
-    v8.0.0: 완료 항목이 쌓이면 목록과 `GET /todos` 응답이 같이 커진다
-        (v7.0.0 JMeter 에서 가장 무거웠던 요청). 하나씩 지우면 요청이 N 번 필요하다.
+    v8.0.0: 하나씩 지우면 요청이 N 번 오가고, 중간에 실패하면 일부만 지워진 채 남는다.
 
-    - `completed` 를 필수로 둔다. 파라미터 없는 `DELETE /todos` 가 '전부 삭제' 로
-      오해되거나 실수로 호출되는 일을 막는다 (없으면 422).
-    - `completed=false`(진행 중 항목 전부 삭제)는 되돌릴 수 없는 위험한 동작이라
-      지원하지 않는다 (400).
-    - 지운 id 를 감사 로그에 남긴다 → Loki 에서 `|= "todos cleared"` 로 이력 조회.
+    - 전부 있거나 전부 안 지우거나(원자적). 없는 id 가 하나라도 있으면 404 를 돌려주고
+      아무것도 지우지 않는다. 다른 사람이 먼저 지운 항목이 섞여 있다는 뜻이라
+      화면을 새로 고친 뒤 다시 고르게 한다.
+    - 같은 id 가 여러 번 와도 한 번만 지운다.
+    - 지운 id 를 감사 로그에 남긴다 → Loki 에서 `|= "todos deleted"` 로 이력 조회.
     """
-    if not completed:
-        raise HTTPException(400, "Only completed=true is supported")
+    wanted = list(dict.fromkeys(ids))            # 중복 제거 (순서 유지)
     with _lock:
         todos = load_todos()
-        removed = [t.id for t in todos if t.completed]
-        if removed:                              # 지울 게 없으면 파일을 다시 쓰지 않는다
-            save_todos([t for t in todos if not t.completed])
-    logger.info("todos cleared completed count=%d ids=%s", len(removed), removed)
-    return {"deleted": len(removed), "ids": removed}
+        existing = {t.id for t in todos}
+        missing = [i for i in wanted if i not in existing]
+        if missing:
+            raise HTTPException(404, f"To-Do item not found: {missing}")
+        remove = set(wanted)
+        save_todos([t for t in todos if t.id not in remove])
+    logger.info("todos deleted count=%d ids=%s", len(wanted), wanted)
+    return {"deleted": len(wanted), "ids": wanted}
 
 
 @app.get("/health")                              # v3.0.0: 헬스체크 — 컨테이너/로드밸런서가 상태를 확인
