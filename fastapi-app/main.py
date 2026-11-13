@@ -1,21 +1,46 @@
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
 from pydantic import BaseModel, Field
 
-APP_VERSION = "7.0.0"                            # v7.0.0: JMeter 부하 테스트 + 목록 페이지네이션
+APP_VERSION = "8.0.0"                            # v8.0.0: Loki + Alloy 로그 수집
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
+
+# v8.0.0: 로그는 표준 출력(stdout)으로만 내보낸다.
+#   Docker 가 stdout 을 컨테이너 로그로 저장하고, Alloy 가 그 로그를 읽어 Loki 로 보낸다.
+#   앱은 Loki 주소를 모른다 — 수집·전송은 전부 Alloy 몫이다.
+#
+#   감사 로거(todo)는 v5.1.0 부터 있었지만 핸들러가 없어 INFO 가 실제로는 출력되지 않았다.
+#   이번에 stdout 으로 연결해 생성·수정·삭제 이력도 Loki 에서 검색할 수 있게 한다.
+#   propagate 는 그대로 둔다 (uvicorn 은 루트 로거에 핸들러를 달지 않아 중복 출력이 없고,
+#   pytest 의 caplog 는 루트로 전파된 기록을 잡는다).
+_audit_handler = logging.StreamHandler(sys.stdout)
+_audit_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+logger.addHandler(_audit_handler)
+logger.setLevel(logging.INFO)
+
+# v8.0.0: 액세스 로그 — 요청 1건당 1줄. 형식은 Grafana LogQL pattern 파서 기준이므로 바꾸지 않는다.
+#   IP - "METHOD PATH HTTP/버전" 상태코드 응답시간
+access_logger = logging.getLogger("custom.access")
+access_logger.setLevel(logging.INFO)
+access_logger.addHandler(logging.StreamHandler(sys.stdout))
+access_logger.propagate = False                  # 상위 로거로 넘겨 두 번 찍히는 것을 방지
+
+# v8.0.0: uvicorn 기본 액세스 로그 끄기 (아래 미들웨어가 대신 기록).
+#   켜 두면 요청 1번에 2줄이 남아 Grafana 의 Path 별 호출 수가 2배가 된다.
+logging.getLogger("uvicorn.access").disabled = True
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
 # v4.0.0: 데이터 위치를 환경변수로 분리. 컨테이너에서는 볼륨 경로를 주입한다.
@@ -48,6 +73,36 @@ Instrumentator(
     should_group_status_codes=True,
     excluded_handlers=["/metrics", "/health"],
 ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+
+
+@app.middleware("http")                          # v8.0.0: 모든 요청을 한 줄씩 기록
+async def log_requests(request: Request, call_next):
+    """요청 1건을 액세스 로그 1줄로 남긴다.
+
+    - 처리 중 예외가 나도 finally 에서 500 으로 기록한다. 장애 요청이 로그에서
+      빠지면 Loki 로 원인을 찾을 수 없다.
+    - 경로만 남기고 쿼리스트링(?q=검색어)은 남기지 않는다. 검색어는 사용자 입력이라
+      로그에 쌓을 이유가 없고, Path 별 집계도 쿼리스트링이 섞이면 쪼개진다.
+    - /health(30초마다)와 /metrics(15초마다)도 기록은 한다. 집계에서 뺄지는
+      Grafana 쿼리에서 정한다 (Instrumentator 의 excluded_handlers 와 같은 기준).
+    """
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        client = request.client.host if request.client else "-"
+        access_logger.info(
+            '%s - "%s %s HTTP/%s" %d %.3fs',
+            client,
+            request.method,
+            request.url.path,
+            request.scope.get("http_version", "1.1"),
+            status,
+            time.perf_counter() - start,
+        )
 
 
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)

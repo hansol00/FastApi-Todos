@@ -1,0 +1,15 @@
+# v8.0.0: Loki 데이터소스도 파일로 등록 (#9 가이드 5번을 UI 대신 provisioning 으로)
+# Grafana 를 다시 띄우면 Connections → Data sources 에 자동으로 생긴다.
+apiVersion: 1
+
+datasources:
+  # Alloy 가 FastAPI 컨테이너 로그를 밀어넣는 로그 저장소
+  - name: Loki
+    type: loki
+    uid: loki-011                      # 대시보드 JSON 에서 이 uid 로 참조
+    access: proxy
+    url: http://loki:3100              # compose 서비스 이름 (localhost:3100 은 Grafana 자신이라 실패)
+    isDefault: false
+    editable: true
+    jsonData:
+      maxLines: 1000

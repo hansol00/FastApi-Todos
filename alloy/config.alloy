@@ -1,0 +1,46 @@
+// v8.0.0: FastAPI 컨테이너 로그 → Loki
+// 파이프라인: ① 컨테이너 찾기 → ② 라벨 정리 → ③ 로그 읽기 → ④ Loki 로 전송
+// (Promtail 은 2026-03-02 지원 종료 → Alloy 사용)
+
+// ① 수집 대상 찾기: Docker 소켓으로 실행 중인 컨테이너를 조회하고,
+//    docker compose 서비스 이름이 fastapi-app 인 컨테이너만 남긴다.
+//    container_name(FastApi-app-011)이 아니라 서비스 이름 기준이다.
+//    → Jenkins 가 `docker run` 으로 띄운 컨테이너는 compose 라벨이 없어 수집 대상이 아님
+discovery.docker "fastapi" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s" // 기본 1m. compose up --build 로 컨테이너가 바뀐 뒤 빨리 다시 붙도록
+
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.service=fastapi-app"]
+  }
+}
+
+// ② 라벨 정리: 컨테이너 이름("/FastApi-app-011")의 앞 '/'를 떼고 container 라벨로 저장
+discovery.relabel "fastapi" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+// ③ 로그 읽기: 컨테이너의 stdout/stderr 를 계속 읽어(tail) 다음 단계로 전달.
+//    application="fastapi" 라벨로 Grafana 에서 {application="fastapi"} 로 조회한다.
+loki.source.docker "fastapi" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.fastapi.targets
+  labels        = {"application" = "fastapi"}
+  relabel_rules = discovery.relabel.fastapi.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+// ④ 전송: Loki 의 Push API 로 로그를 밀어 넣는다 (HTTP Push).
+//    loki 는 docker-compose.yml 의 서비스 이름 (container_name 인 loki-011 아님)
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

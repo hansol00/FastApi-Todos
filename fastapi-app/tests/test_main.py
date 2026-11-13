@@ -4,6 +4,8 @@
 """
 
 import json
+import logging
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -411,3 +413,58 @@ def test_limit_above_cap_is_rejected(many_todos):
 def test_negative_offset_is_rejected(many_todos):
     """음수 offset 은 파이썬 슬라이스에서 뒤에서부터 세므로 반드시 막아야 한다."""
     assert client.get("/todos", params={"offset": -1}).status_code == 422
+
+
+#액세스 로그 (v8.0.0, Loki + Alloy)
+
+# Grafana LogQL 의 pattern `<_> - "<method> <path> <_>" <status> <_>` 와 같은 형식
+ACCESS_LINE = re.compile(
+    r'^\S+ - "(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[\d.]+" (?P<status>\d{3}) \d+\.\d{3}s$'
+)
+
+
+@pytest.fixture
+def access_log(caplog, monkeypatch):
+    """액세스 로거는 propagate=False 라 caplog 에 안 잡힌다. 테스트 동안만 전파를 켠다."""
+    monkeypatch.setattr(main.access_logger, "propagate", True)
+    with caplog.at_level("INFO", logger="custom.access"):
+        yield caplog
+
+
+def access_lines(caplog) -> list[re.Match]:
+    lines = [r.getMessage() for r in caplog.records if r.name == "custom.access"]
+    matches = [ACCESS_LINE.match(line) for line in lines]
+    assert all(matches), lines                   # 한 줄이라도 형식이 다르면 Grafana 집계에서 빠진다
+    return matches
+
+
+def test_access_log_one_line_per_request(access_log):
+    client.get("/todos", params={"q": "비밀검색어"})
+    client.post("/todos", json={"title": "로그 확인"})
+    client.delete("/todos/999")
+
+    got = [(m["method"], m["path"], m["status"]) for m in access_lines(access_log)]
+    assert got == [
+        ("GET", "/todos", "200"),
+        ("POST", "/todos", "201"),
+        ("DELETE", "/todos/999", "404"),
+    ]
+    assert "비밀검색어" not in access_log.text   # 쿼리스트링(사용자 입력)은 남기지 않는다
+
+
+def test_access_log_records_500_on_unhandled_error(access_log, monkeypatch):
+    """처리 중 예외가 나도 요청이 로그에서 빠지지 않아야 Loki 로 장애를 추적할 수 있다."""
+    def broken():
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(main, "load_todos", broken)
+    failing_client = TestClient(app, raise_server_exceptions=False)
+    assert failing_client.get("/todos").status_code == 500
+
+    [m] = access_lines(access_log)
+    assert (m["method"], m["path"], m["status"]) == ("GET", "/todos", "500")
+
+
+def test_uvicorn_access_log_disabled():
+    """켜져 있으면 요청 1건이 2줄로 남아 Path 별 호출 수가 2배가 된다."""
+    assert logging.getLogger("uvicorn.access").disabled

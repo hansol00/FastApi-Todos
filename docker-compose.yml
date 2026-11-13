@@ -179,6 +179,49 @@ services:
     networks:
       - loadtest-net
 
+  loki:                                         # ← v8.0.0 추가: 로그 저장소
+    image: grafana/loki:3.7.9                   # latest 대신 버전 고정 (2026-11 기준 최신 안정 버전)
+    container_name: loki-011
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL                                     # 이미지가 비root(uid 10001)로 실행되어 커널 권한이 필요 없음
+    command:
+      - -config.file=/etc/loki/local-config.yaml  # 이미지 기본 설정 (TSDB + schema v13, 데이터 경로 /loki)
+      - -reporting.enabled=false                # 기본값은 Grafana Labs 로 익명 사용 통계 전송 → 끔
+    ports:
+      - "127.0.0.1:3100:3100"                   # 서버 자신에게만 공개 (이 설정의 Loki 는 인증이 없음)
+    volumes:
+      - loki-data:/loki                         # 수집한 로그 보존 (컨테이너를 다시 만들어도 유지)
+    restart: unless-stopped
+    networks:
+      - loadtest-net
+
+  alloy:                                        # ← v8.0.0 추가: 로그 수집기 (Promtail 대체, 2026-03 EOL)
+    image: grafana/alloy:v1.21.3                # Alloy 태그는 앞에 v 가 붙는다 (Loki 는 안 붙음)
+    container_name: alloy-011
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345 # 컨테이너 안에서는 전체 주소로 열어야 아래 ports 가 동작
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting                     # Grafana Labs 로 사용 통계 전송 끔
+      - /etc/alloy/config.alloy
+    ports:
+      - "127.0.0.1:12345:12345"                 # Alloy UI. 로그인 기능 없음 → 서버 자신에게만 공개 (SSH 터널로 접속)
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # 컨테이너 목록·로그를 읽는 통로. 읽기 전용(:ro)이어도 Docker API 전체를 쓸 수 있는
+      # 강한 권한이라, Alloy UI 포트도 127.0.0.1 에만 연다.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data          # 어디까지 읽었는지(positions) 저장 → 재시작해도 중복 전송 안 함
+    restart: unless-stopped
+    depends_on:
+      - loki
+    networks:
+      - loadtest-net
+
 networks:
   loadtest-net:
     name: loadtest-net                          # 이름을 고정해야 Jenkins에서
@@ -193,3 +236,5 @@ volumes:                                        # ← 최상위(0칸)로 이동
   prometheus-data:                              # ← v6.0.0 추가
   grafana-data:                                 # ← v6.0.0 추가
   influxdb-data:                                # ← v7.0.0 추가
+  loki-data:                                    # ← v8.0.0 추가
+  alloy-data:                                   # ← v8.0.0 추가
