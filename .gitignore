@@ -21,3 +21,6 @@ ui_tests/test-results/
 jmeter/report/
 jmeter/results.jtl
 jmeter/jmeter.log
+# SonarQube 분석용 커버리지 리포트 (v9.0.0)
+fastapi-app/coverage.xml
+integration_report/

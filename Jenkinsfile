@@ -2,6 +2,11 @@
 //  Jenkins Deploy Jmeter  (v7.0.0 / #8 과제)
 //  Jenkins 는 sogang011(163.239.77.84)에서만 돌고, 배포 대상은 팀서버 sogang004.
 //  JMeter 컨테이너도 Jenkins 가 있는 sogang011 에서 띄워 팀서버를 때린다.
+//
+//  v9.0.0: 주차별 Jenkins 잡(Pipeline script)에 흩어져 있던 단계를 이 파일 하나로 합침
+//    - SonarQube Analysis / Quality Gate ('Jenkins Deploy Sonarqube' 잡, v5.0.0)
+//    - Integration Test                ('Jenkins Deploy Sonarqube' 잡, v4.0.0~)
+//    - pip-audit 가 취약점을 찾으면 빌드 실패, requirements.txt '==' 고정 여부 검사
 // =====================================================================
 pipeline {
     agent any
@@ -22,9 +27,17 @@ pipeline {
         JMETER_IMAGE_NAME     = 'jmeter-011'          // 멀티아키 베이스라 'arm' 이름 제거
         LOADTEST_NET          = 'loadtest-net'        // docker-compose.yml 에서 이름 고정한 네트워크
         INFLUX_URL            = 'http://influxdb-011:8086/write?db=jmeter'
+
+        // --- 정적 분석 (v9.0.0) ------------------------------------------
+        // 아래 두 값은 비밀값이 아니라 Jenkins 관리 화면에 등록한 '이름'이다.
+        //   SONAR_SERVER : Manage Jenkins > System > SonarQube servers 의 Name
+        //   SONAR_SCANNER: Manage Jenkins > Tools > SonarQube Scanner installations 의 Name
+        SONAR_SERVER          = 'sonarqube'
+        SONAR_SCANNER         = 'sonar'
         // SONAR_TOKEN 같은 비밀값은 전역 environment 에 두지 않는다.
         //   전역에 두면 모든 스테이지 셸에 주입되어 set -x 나 env 덤프로 로그에 남는다.
-        //   필요한 스테이지에서만 withCredentials 로 감싸 쓸 것.
+        //   토큰은 SonarQube 서버 설정에 연결된 Jenkins Credential 로만 관리하고,
+        //   withSonarQubeEnv 가 분석 블록 안에서만 주입한다(로그에는 마스킹).
     }
 
     options {
@@ -51,9 +64,20 @@ pipeline {
                     pip install -r fastapi-app/requirements.txt
 
                     # 의존성 취약점 점검(공급망 보안).
-                    # requirements.txt 에 '==' 로 버전이 고정돼 있는지도 같이 확인할 것.
+                    # 1) requirements.txt 의 모든 의존성이 '==' 로 고정돼 있는지 검사.
+                    #    '>=' 이면 빌드마다 설치 버전이 달라져 아래 점검 결과를 믿을 수 없다.
+                    UNPINNED=$(grep -vE '^[[:space:]]*(#|$)' fastapi-app/requirements.txt \
+                               | grep -vE '^[A-Za-z0-9._-]+(\\[[A-Za-z0-9,._-]+\\])?==[^[:space:]]+' || true)
+                    if [ -n "$UNPINNED" ]; then
+                        echo "버전이 '==' 로 고정되지 않은 의존성:"
+                        echo "$UNPINNED"
+                        exit 1
+                    fi
+
+                    # 2) 알려진 취약점(CVE)이 있으면 여기서 빌드를 멈춘다.
+                    #    v7.0.0 까지는 '|| true' 라 취약점이 나와도 통과했다.
                     pip install pip-audit
-                    pip-audit -r fastapi-app/requirements.txt || true
+                    pip-audit -r fastapi-app/requirements.txt
                 '''
             }
         }
@@ -69,7 +93,7 @@ pipeline {
                         --html=pytest_report/report.html \
                         --self-contained-html \
                         --cov=fastapi-app \
-                        --cov-report=xml:coverage.xml \
+                        --cov-report=xml:fastapi-app/coverage.xml \
                         --cov-report=html:htmlcov
                 '''
             }
@@ -91,6 +115,33 @@ pipeline {
                         alwaysLinkToLastBuild: true,
                         allowMissing         : true
                     ])
+                }
+            }
+        }
+
+        // v9.0.0: 테스트 '다음'에 분석한다. 위 단계가 만든 fastapi-app/coverage.xml 을
+        // SonarQube 가 읽어야 커버리지 조건(Quality Gate)이 0% 로 판정되지 않는다.
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    def scannerHome = tool env.SONAR_SCANNER
+                    // 서버 URL·토큰은 withSonarQubeEnv 가 이 블록 안에서만 주입한다.
+                    // (sonar-project.properties 의 sonar.host.url 도 여기서 덮어씀)
+                    withSonarQubeEnv(env.SONAR_SERVER) {
+                        dir('fastapi-app') {
+                            sh "${scannerHome}/bin/sonar-scanner"
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quality Gate 를 통과하지 못하면 이미지 빌드·배포로 넘어가지 않는다.
+        // 결과는 SonarQube → Jenkins 웹훅(http://<jenkins>/sonarqube-webhook/)으로 받는다.
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }
@@ -155,6 +206,35 @@ done
 echo "deployed container did not become healthy"; exit 1
 EOSSH
                     '''
+                }
+            }
+        }
+
+        // v9.0.0: 배포된 팀서버에 실제 HTTP 요청을 보내 API 동작을 확인한다.
+        // 실패하면 부하 테스트까지 가지 않는다(고장 난 서버에 부하를 걸어 봐야 의미가 없다).
+        stage('Integration Test') {
+            steps {
+                sh '''
+                    set -eu
+                    . venv/bin/activate
+                    mkdir -p integration_report
+
+                    BASE_URL="http://$REMOTE_HOST:$REMOTE_PORT" \
+                    pytest integration_tests \
+                        --html=integration_report/report.html \
+                        --self-contained-html
+                '''
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        reportName           : 'Integration Test Report',
+                        reportDir            : 'integration_report',
+                        reportFiles          : 'report.html',
+                        keepAll              : true,
+                        alwaysLinkToLastBuild: true,
+                        allowMissing         : true
+                    ])
                 }
             }
         }
