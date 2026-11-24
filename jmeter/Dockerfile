@@ -27,19 +27,25 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # 다운로드 무결성 검증 — 검증 없는 다운로드는 미러 변조·중간자 공격에 무방비다.
-# v9.0.0: archive.apache.org 는 느리거나 연결이 멈추는 일이 있다. 시간 제한이 없으면
-#   curl 이 끝없이 기다려 파이프라인 전체 timeout(30분)까지 붙잡힌다.
-#   → 연결 20초, 시도당 5분 제한, 일시 오류·시간 초과는 2번 재시도(재시도 포함 최대 15분). 넘기면 바로 실패시킨다.
+# v9.0.0: SHA-512 를 이 파일에 고정한다 (베이스 이미지 digest 고정과 같은 원리).
+#   예전에는 체크섬도 같은 서버에서 받아 비교했는데, 서버가 변조되면 파일과 체크섬이
+#   함께 바뀌어 검증이 의미가 없다. 값은 dlcdn·archive 두 곳의 .sha512 가 같음을 확인한 것.
+ARG JMETER_SHA512=5978a1a35edb5a7d428e270564ff49d2b1b257a65e17a759d259a9283fc17093e522fe46f474a043864aea6910683486340706d745fcdf3db1505fd71e689083
+# v9.0.0: 다운로드 서버
+#   archive.apache.org 는 학교망에서 약 40~50KB/s 로 느려 83MB 를 받는 데 30분 가까이 걸렸다
+#   (FastApi-Todos Pipeline #3: 5분 동안 12~15MB 받고 시간 초과).
+#   → Apache CDN(dlcdn) 을 먼저 쓰고, 버전이 내려가 dlcdn 에 없을 때만 archive 로 넘어간다.
+#   curl 은 연결 20초·시도당 5분 제한, 1번 재시도 → 서버당 최대 약 10분, 넘기면 실패시킨다.
+#   (시간 제한이 없으면 연결이 멈췄을 때 파이프라인 전체 timeout 30분까지 붙잡힌다)
 RUN set -eux; \
     cd /tmp; \
-    CURL="curl -fsSL --connect-timeout 20 --max-time 300 --retry 2 --retry-delay 5 --retry-max-time 900"; \
-    $CURL -o jmeter.tgz    "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"; \
-    $CURL -o jmeter.sha512 "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz.sha512"; \
-    EXPECTED="$(tr -d ' \n' < jmeter.sha512 | sed 's/.*://' | grep -oE '[0-9a-fA-F]{128}' | head -1 | tr 'A-Z' 'a-z')"; \
-    ACTUAL="$(sha512sum jmeter.tgz | cut -d' ' -f1)"; \
-    [ "$EXPECTED" = "$ACTUAL" ] || { echo "checksum mismatch: $ACTUAL != $EXPECTED"; exit 1; }; \
+    FILE="apache-jmeter-${JMETER_VERSION}.tgz"; \
+    CURL="curl -fsSL --connect-timeout 20 --max-time 300 --retry 1 --retry-delay 5"; \
+    $CURL -o jmeter.tgz "https://dlcdn.apache.org/jmeter/binaries/${FILE}" \
+      || $CURL -o jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/${FILE}"; \
+    echo "${JMETER_SHA512}  jmeter.tgz" | sha512sum -c -; \
     tar -xzf jmeter.tgz -C /opt/; \
-    rm -f jmeter.tgz jmeter.sha512
+    rm -f jmeter.tgz
 
 # JVM 힙. 기본값(1g)은 스레드 수가 늘면 GC 로 응답 시간이 왜곡된다.
 ENV JVM_ARGS="-Xms512m -Xmx1g"
