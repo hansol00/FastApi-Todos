@@ -1,5 +1,11 @@
 # Python 3.13 slim 베이스 이미지 (3.9는 2025-10 지원 종료, 최신 FastAPI는 Python 3.10 이상 필요)
-FROM python:3.13-slim
+# v9.0.0: 태그만 쓰면 같은 태그가 다른 이미지로 바뀔 수 있다(보안 패치 재빌드 등).
+#   그러면 빌드할 때마다 다른 베이스가 들어가 재현이 안 되고, 그 위에 쌓인 레이어 캐시도 전부 무효가 된다.
+#   (실제로 2026-11-24 빌드에서 temurin 베이스가 바뀌어 JMeter 를 처음부터 다시 받았다)
+#   digest(@sha256) 로 고정해 언제 빌드해도 같은 베이스를 쓴다. 태그는 사람이 읽기 위해 남긴다.
+#   올릴 때: docker pull <태그> 후 docker inspect --format '{{index .RepoDigests 0}}' <태그> 로
+#   새 digest 를 확인해 이 줄을 바꾸고 커밋한다 (멀티아키 인덱스 digest 라 amd64/arm64 모두 동작).
+FROM python:3.13-slim@sha256:6d68eb6310a906f26c7638eb6ea7557d4261662df3181af2f80f1f9a7e34c549
 
 # .pyc 생성 안 함 / 로그 즉시 출력 / pip 캐시·버전체크 끄기
 ENV PYTHONDONTWRITEBYTECODE=1 \
