@@ -513,3 +513,96 @@ def test_access_log_records_500_on_unhandled_error(access_log, monkeypatch):
 def test_uvicorn_access_log_disabled():
     """켜져 있으면 요청 1건이 2줄로 남아 Path 별 호출 수가 2배가 된다."""
     assert logging.getLogger("uvicorn.access").disabled
+
+
+#우선순위 + 정렬 (v9.0.0)
+
+def test_create_todo_priority_defaults_to_medium():
+    response = client.post("/todos", json={"title": "기본값"})
+    assert response.status_code == 201
+    assert response.json()["priority"] == "medium"
+
+
+def test_create_todo_with_priority():
+    response = client.post("/todos", json={"title": "급함", "priority": "high"})
+    assert response.json()["priority"] == "high"
+    assert load_todos()[0].priority == "high"
+
+
+def test_invalid_priority_rejected():
+    response = client.post("/todos", json={"title": "x", "priority": "urgent"})
+    assert response.status_code == 422
+    assert load_todos() == []                  # 잘못된 요청은 저장되지 않는다
+
+
+def test_update_changes_priority():
+    save_todos([sample()])
+    response = client.put("/todos/1", json={"title": "Test", "priority": "low"})
+    assert response.json()["priority"] == "low"
+    assert load_todos()[0].priority == "low"
+
+
+def test_legacy_data_without_priority_is_readable():
+    """v8.0.0 이전에 저장된 todo.json(priority 없음)도 그대로 읽혀야 한다."""
+    main.TODO_FILE.write_text(
+        '[{"id": 1, "title": "예전 항목", "description": "", "completed": false, "due_date": null}]',
+        encoding="utf-8",
+    )
+    response = client.get("/todos")
+    assert response.status_code == 200
+    assert response.json()[0]["priority"] == "medium"
+
+
+@pytest.fixture
+def mixed_todos():
+    """정렬 테스트용 — 일부러 id 순서와 우선순위·마감일 순서를 어긋나게 둔다."""
+    save_todos([
+        sample(1, "보통-마감없음", priority="medium"),
+        sample(2, "낮음-11/30", priority="low", due_date="2026-11-30"),
+        sample(3, "높음-12/10", priority="high", due_date="2026-12-10"),
+        sample(4, "높음-11/25", priority="high", due_date="2026-11-25", completed=True),
+        sample(5, "보통-11/30", priority="medium", due_date="2026-11-30"),
+    ])
+
+
+def ids(response) -> list[int]:
+    return [t["id"] for t in response.json()]
+
+
+def test_no_sort_keeps_insertion_order(mixed_todos):
+    """sort 를 생략하면 기존처럼 추가한 순서(id)."""
+    assert ids(client.get("/todos")) == [1, 2, 3, 4, 5]
+
+
+def test_sort_by_priority(mixed_todos):
+    """high → medium → low, 같은 우선순위는 마감일이 빠른 것 먼저(마감일 없으면 뒤)."""
+    assert ids(client.get("/todos", params={"sort": "priority"})) == [4, 3, 5, 1, 2]
+
+
+def test_sort_by_due_date(mixed_todos):
+    """마감일이 빠른 것 먼저, 같은 날이면 우선순위 높은 것 먼저, 마감일 없으면 맨 뒤."""
+    assert ids(client.get("/todos", params={"sort": "due_date"})) == [4, 5, 2, 3, 1]
+
+
+def test_sort_ties_fall_back_to_id():
+    """모든 조건이 같으면 id 순 — 요청마다 순서가 바뀌지 않아야 페이지가 겹치지 않는다."""
+    save_todos([sample(i, f"같음{i}") for i in (3, 1, 2)])
+    assert ids(client.get("/todos", params={"sort": "priority"})) == [1, 2, 3]
+    assert ids(client.get("/todos", params={"sort": "due_date"})) == [1, 2, 3]
+
+
+def test_sort_applies_before_pagination(mixed_todos):
+    """정렬한 '다음' 잘라야 2페이지가 정렬 순서의 이어지는 부분이 된다."""
+    first = ids(client.get("/todos", params={"sort": "priority", "limit": 2}))
+    second = ids(client.get("/todos", params={"sort": "priority", "limit": 2, "offset": 2}))
+    assert first + second == [4, 3, 5, 1]
+
+
+def test_sort_combined_with_filter(mixed_todos):
+    """완료 필터로 거른 뒤 정렬한다."""
+    response = client.get("/todos", params={"sort": "priority", "completed": "false"})
+    assert ids(response) == [3, 5, 1, 2]
+
+
+def test_invalid_sort_rejected(mixed_todos):
+    assert client.get("/todos", params={"sort": "title"}).status_code == 422

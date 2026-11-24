@@ -7,13 +7,14 @@ import threading
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
 from pydantic import BaseModel, Field
 
-APP_VERSION = "8.0.0"                            # v8.0.0: Loki + Alloy 로그 수집
+APP_VERSION = "9.0.0"                            # v9.0.0: 우선순위 + 정렬
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
@@ -105,12 +106,19 @@ async def log_requests(request: Request, call_next):
         )
 
 
+# v9.0.0: 우선순위. 문자열 3개로만 받는다 (그 밖의 값은 422).
+Priority = Literal["high", "medium", "low"]
+PRIORITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}   # 정렬 순서 (작을수록 앞)
+
+
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
     title: str = Field(min_length=1, max_length=100)
     # v5.1.0: 길이 제한 추가 (OWASP A04, CWE-770) — title 과 검증 수준을 맞춤
     description: str = Field(default="", max_length=500)
     completed: bool = False
     due_date: date | None = None                 # v2.0.0: 마감일 (없으면 null)
+    # v9.0.0: 기본값 medium — 필드가 없는 기존 todo.json 도 그대로 읽힌다(마이그레이션 불필요)
+    priority: Priority = "medium"
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
@@ -147,6 +155,22 @@ def save_todos(todos: list[TodoItem]) -> None:
         raise
 
 
+def sort_todos(todos: list[TodoItem], sort: str) -> list[TodoItem]:
+    """v9.0.0: 우선순위순 또는 마감일순으로 정렬한다.
+
+    - priority: high → medium → low. 같으면 마감일이 빠른 것, 그다음 id 순.
+    - due_date: 마감일이 빠른 것부터, 마감일 없는 항목은 맨 뒤. 같으면 우선순위, 그다음 id 순.
+    마지막 기준을 id 로 두어 같은 조건이면 언제나 같은 순서가 나오게 한다.
+    순서가 요청마다 바뀌면 limit/offset 으로 페이지를 넘길 때 항목이 빠지거나 겹친다.
+    """
+    def due_key(t: TodoItem) -> tuple[bool, date]:
+        return (t.due_date is None, t.due_date or date.max)   # None 은 맨 뒤
+
+    if sort == "priority":
+        return sorted(todos, key=lambda t: (PRIORITY_RANK[t.priority], due_key(t), t.id))
+    return sorted(todos, key=lambda t: (due_key(t), PRIORITY_RANK[t.priority], t.id))
+
+
 def find_index(todos: list[TodoItem], todo_id: int) -> int:
     for i, todo in enumerate(todos):
         if todo.id == todo_id:
@@ -173,17 +197,22 @@ def get_todos(
     offset: int = Query(
         default=0, ge=0, description="건너뛸 개수. limit 과 함께 페이지를 넘긴다"
     ),
+    sort: Literal["priority", "due_date"] | None = Query(
+        default=None,
+        description="정렬 기준. 생략하면 추가한 순서(id)",
+    ),
 ) -> list[TodoItem]:
     """검색어·완료 여부로 거르고, 필요하면 잘라서 돌려준다.
 
     v6.0.0: 검색(q)과 완료 여부(completed) 필터.
     v7.0.0: limit/offset 페이지네이션.
+    v9.0.0: sort 정렬. 거른 '다음', 자르기 '전에' 정렬해야 페이지가 정렬 순서대로 나뉜다.
         JMeter 부하 테스트에서 `GET /todos` 가 가장 무거운 요청으로 나왔다.
         항목이 늘수록 전체를 직렬화해 내려주기 때문에, 응답 시간과 전송량이
         데이터 건수에 그대로 비례한다. 화면은 한 번에 수십 개만 보여주므로
         서버가 잘라서 주는 편이 맞다.
 
-        네 파라미터 모두 선택적이라 기존 `GET /todos` 동작은 그대로다.
+        모든 파라미터가 선택적이라 기존 `GET /todos` 동작은 그대로다.
         le=100 으로 상한을 둔 것은 거르기 전 전체를 요구하는 요청 하나가
         서버를 묶어두지 못하게 하기 위함이다 (OWASP A04, CWE-770).
     """
@@ -195,6 +224,8 @@ def get_todos(
         ]
     if completed is not None:
         todos = [t for t in todos if t.completed is completed]
+    if sort:
+        todos = sort_todos(todos, sort)
     if offset:
         todos = todos[offset:]
     if limit is not None:
@@ -209,7 +240,7 @@ def create_todo(payload: TodoIn) -> TodoItem:
         new_id = max((t.id for t in todos), default=0) + 1
         todo = TodoItem(id=new_id, **payload.model_dump())
         save_todos(todos + [todo])
-    logger.info("todo created id=%s title=%r", todo.id, todo.title)
+    logger.info("todo created id=%s title=%r priority=%s", todo.id, todo.title, todo.priority)
     return todo
 
 

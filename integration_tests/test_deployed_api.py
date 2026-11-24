@@ -80,3 +80,17 @@ def test_create_invalid(client):
 def test_update_not_found(client):
     response = client.put("/todos/999999", json={"title": "없는 항목"})
     assert response.status_code == 404
+
+def test_priority_and_sort(client):
+    # v9.0.0: 우선순위가 저장되고, 우선순위순 정렬에서 high 가 low 보다 앞에 오는지 확인
+    tag = uuid.uuid4().hex[:8]
+    low = client.post("/todos", json={"title": f"통합-low-{tag}", "priority": "low"}).json()
+    high = client.post("/todos", json={"title": f"통합-high-{tag}", "priority": "high"}).json()
+    try:
+        assert high["priority"] == "high"
+        response = client.get("/todos", params={"q": tag, "sort": "priority"})
+        assert response.status_code == 200
+        assert [t["id"] for t in response.json()] == [high["id"], low["id"]]
+    finally:
+        client.delete(f"/todos/{low['id']}")
+        client.delete(f"/todos/{high['id']}")

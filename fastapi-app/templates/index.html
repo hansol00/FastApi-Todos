@@ -107,6 +107,18 @@
             border-radius: 9px;
             padding: .55rem .7rem;
         }
+        /* v9.0.0: 우선순위·정렬 선택 상자도 입력칸과 같은 모양 */
+        select {
+            font: inherit;
+            font-size: .92rem;
+            color: var(--ink);
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            padding: .55rem .5rem;
+            cursor: pointer;
+        }
+        select:focus-visible { outline: 2px solid var(--lilac); outline-offset: 1px; }
         input[type="text"] { flex: 1 1 11rem; min-width: 0; }
         input[type="date"] { flex: 0 1 auto; color: var(--ink-soft); }
         input::placeholder { color: #ADA5C0; }
@@ -128,7 +140,8 @@
         form button:hover { background: #BBAAEC; }
 
         /* ── 필터 ───────────────────────────────── */
-        #toolbar { display: flex; gap: .4rem; margin-bottom: .75rem; }
+        #toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin-bottom: .75rem; }
+        #sort { font-size: .85rem; padding: .3rem .45rem; border-radius: 6px; background: transparent; }
         #toolbar button {
             font: inherit;
             font-size: .85rem;
@@ -141,7 +154,7 @@
         }
         #toolbar button:hover { color: var(--ink); }
         #search {
-          margin-left: auto; min-width: 11rem; padding: .3rem .55rem;
+          margin-left: auto; flex: 0 1 11rem; min-width: 7rem; padding: .3rem .55rem;
           border: 1px solid var(--line); border-radius: 6px;
           background: transparent; color: var(--ink); font: inherit;
         }
@@ -209,7 +222,8 @@
             cursor: pointer;
         }
         li span { flex: 1; min-width: 0; font-size: .95rem; }
-        .done { text-decoration: line-through; color: var(--ink-soft); }
+        /* v9.0.0 fix: li 안으로 한정 — 전역 .done 이 통계의 '완료' 칸(div.done)에도 취소선을 그었다 */
+        li .done { text-decoration: line-through; color: var(--ink-soft); }
         .overdue { color: #C85B42; font-weight: 600; }
         .due {
             display: inline-block;
@@ -223,6 +237,22 @@
             white-space: nowrap;
         }
         .overdue .due { color: #C85B42; background: #FBDDD5; }
+
+        /* v9.0.0: 우선순위 배지 — 기한 지남(코랄)·완료(민트)와 겹치지 않는 색 */
+        .prio {
+            display: inline-block;
+            margin-right: .45rem;
+            font-size: .72rem;
+            font-weight: 600;
+            border-radius: 6px;
+            padding: .05rem .4rem;
+            vertical-align: .08em;
+            white-space: nowrap;
+        }
+        .prio.high   { color: #fff;            background: #6B4FC9; }
+        .prio.medium { color: var(--ink-soft); background: var(--lilac-dim); }
+        .prio.low    { color: #9A93AC;         background: transparent; border: 1px solid var(--line); }
+        .done .prio  { opacity: .55; }
 
         li button {
             font: inherit;
@@ -270,6 +300,11 @@
         <input type="text" id="title" placeholder="할 일 (예: 운영체제 과제)" required>
         <input type="text" id="description" placeholder="설명 (선택)">
         <input type="date" id="due_date" title="마감일 (선택)">
+        <select id="priority" aria-label="우선순위">   <!-- v9.0.0 -->
+            <option value="high">높음</option>
+            <option value="medium" selected>보통</option>
+            <option value="low">낮음</option>
+        </select>
         <button type="submit">할 일 추가</button>
     </form>
 
@@ -280,6 +315,11 @@
         <button id="select-mode" type="button">선택 삭제</button>   <!-- v8.0.0 -->
         <input type="search" id="search" placeholder="검색 (제목·설명)"
                autocomplete="off" aria-label="할 일 검색">
+        <select id="sort" aria-label="정렬">   <!-- v9.0.0: 서버에 ?sort= 로 전달 -->
+            <option value="">추가한 순</option>
+            <option value="priority">우선순위순</option>
+            <option value="due_date">마감일순</option>
+        </select>
     </div>
 
     <p id="error" role="alert" hidden></p>
@@ -299,6 +339,8 @@
         let allTodos = [];      // 서버에서 받은 전체 목록
         let filter = "all";     // all | active | done
         let query = "";         // v6.0.0: 검색어 (서버에 ?q= 로 전달)
+        let sort = "";          // v9.0.0: 정렬 기준 (서버에 ?sort= 로 전달, 빈 값이면 추가한 순)
+        const PRIORITY_LABEL = { high: "높음", medium: "보통", low: "낮음" };
         let selecting = false;  // v8.0.0: 선택 삭제 모드
         let selected = new Set();   // v8.0.0: 선택한 할 일 id
 
@@ -325,8 +367,12 @@
         }
 
         // v6.0.0: 검색어가 있으면 서버에서 걸러 받는다 (GET /todos?q=...)
+        // v9.0.0: 정렬도 서버가 한다 (GET /todos?sort=...) — 페이지네이션과 순서가 어긋나지 않게
         const load = () => run("목록 불러오기", async () => {
-          const qs = query ? `?q=${encodeURIComponent(query)}` : "";
+          const params = new URLSearchParams();
+          if (query) params.set("q", query);
+          if (sort) params.set("sort", sort);
+          const qs = params.size ? `?${params}` : "";
           allTodos = await api(`/todos${qs}`);
           render();
         });
@@ -389,6 +435,12 @@
             text.className = todo.completed ? "done" : overdue ? "overdue" : "";
             // [fix] 설명이 비어 있으면 "—" 구분자를 붙이지 않는다
             text.textContent = todo.description ? `${todo.title} — ${todo.description}` : todo.title;
+            // v9.0.0: 제목 앞에 우선순위 배지
+            const prio = todo.priority ?? "medium";
+            text.prepend(Object.assign(document.createElement("small"), {
+              className: `prio ${prio}`,
+              textContent: PRIORITY_LABEL[prio],
+            }));
             if (todo.due_date) {
               const due = Object.assign(document.createElement("small"), {
                 className: "due",
@@ -417,7 +469,15 @@
           if (description === null) return;
           const due = prompt("마감일 (YYYY-MM-DD, 비우면 없음):", todo.due_date ?? "");
           if (due === null) return;
-          save(todo.id, { ...todo, title: title.trim(), description: description.trim(), due_date: due.trim() || null });
+          // v9.0.0: 우선순위 — 높음/보통/낮음 또는 high/medium/low. 모르는 값이면 기존 값을 유지
+          const answer = prompt("우선순위 (높음 / 보통 / 낮음):", PRIORITY_LABEL[todo.priority ?? "medium"]);
+          if (answer === null) return;
+          const picked = answer.trim().toLowerCase();
+          const priority = Object.keys(PRIORITY_LABEL).find((k) => k === picked || PRIORITY_LABEL[k] === picked)
+            ?? todo.priority ?? "medium";
+          save(todo.id, {
+            ...todo, title: title.trim(), description: description.trim(), due_date: due.trim() || null, priority,
+          });
         }
 
         function remove(id) {
@@ -495,6 +555,9 @@
           searchTimer = setTimeout(load, 250);
         });
 
+        // v9.0.0: 정렬 기준이 바뀌면 서버에서 다시 받는다
+        $("sort").onchange = (event) => { sort = event.target.value; load(); };
+
         document.querySelectorAll("#toolbar button[data-filter]").forEach((btn) => {
           btn.onclick = () => {
             filter = btn.dataset.filter;
@@ -511,6 +574,7 @@
               title: $("title").value.trim(),
               description: $("description").value.trim(),
               due_date: $("due_date").value || null,
+              priority: $("priority").value,        // v9.0.0
             });
             event.target.reset();
             await load();
