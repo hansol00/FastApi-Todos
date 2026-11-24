@@ -6,10 +6,13 @@
 # v9.0.0: 태그만 쓰면 같은 태그가 다른 이미지로 바뀔 수 있다(보안 패치 재빌드 등).
 #   그러면 빌드할 때마다 다른 베이스가 들어가 재현이 안 되고, 그 위에 쌓인 레이어 캐시도 전부 무효가 된다.
 #   (실제로 2026-11-24 빌드에서 temurin 베이스가 바뀌어 JMeter 를 처음부터 다시 받았다)
-#   digest(@sha256) 로 고정해 언제 빌드해도 같은 베이스를 쓴다. 태그는 사람이 읽기 위해 남긴다.
+#   digest(@sha256) 로 고정해 언제 빌드해도 같은 베이스를 쓴다.
+#   태그와 digest 를 같이 쓰면(이미지:태그@sha256) Docker 는 태그를 무시하므로, 태그가 실제
+#   이미지와 달라도 알 수 없다(SonarQube docker:S8431). 그래서 digest 만 쓰고 태그는 아래 주석으로 남긴다.
 #   올릴 때: docker pull <태그> 후 docker inspect --format '{{index .RepoDigests 0}}' <태그> 로
 #   새 digest 를 확인해 이 줄을 바꾸고 커밋한다 (멀티아키 인덱스 digest 라 amd64/arm64 모두 동작).
-FROM eclipse-temurin:17-jre-jammy@sha256:c6a5dd70fb24f4e07ef88cbda8efb613a5a649a1af071a41de8eaabd1ee6b5da
+# 기준 태그: eclipse-temurin:17-jre-jammy (2026-11-24 확인)
+FROM eclipse-temurin@sha256:c6a5dd70fb24f4e07ef88cbda8efb613a5a649a1af071a41de8eaabd1ee6b5da
 
 # JMeter 5.6.3
 #   5.4.1 은 log4j-core 2.13.3 을 번들해 Log4Shell(CVE-2021-44228, CVSS 9.8, RCE)에
