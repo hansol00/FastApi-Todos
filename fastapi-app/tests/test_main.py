@@ -228,9 +228,10 @@ def test_crud_writes_audit_log(caplog):
 
 def test_db_rejects_invalid_priority_directly():
     """API 를 거치지 않고(psql, 스크립트) 넣는 잘못된 값도 DB CHECK 제약이 막는다."""
+    stmt = insert(db.TodoRow).values(title="x", priority="urgent")   # python:S5778 — 문장은 블록 밖에서 만든다
     with db.SessionLocal() as s:
         with pytest.raises(IntegrityError):
-            s.execute(insert(db.TodoRow).values(title="x", priority="urgent"))
+            s.execute(stmt)
 
 
 def test_search_treats_wildcards_literally():

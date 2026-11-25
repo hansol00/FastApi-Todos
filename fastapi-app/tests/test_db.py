@@ -117,8 +117,9 @@ def test_init_db_gives_up_after_retries(monkeypatch, new_engine):
         raise OperationalError("SELECT 1", {}, Exception("connection refused"))
 
     monkeypatch.setattr(db.Base.metadata, "create_all", always_down)
+    engine = new_engine()                        # python:S5778 — 예외를 낼 수 있는 호출은 블록 안에 하나만
     with pytest.raises(OperationalError):
-        db.init_db(new_engine(), retries=2, delay=0)
+        db.init_db(engine, retries=2, delay=0)
     assert len(calls) == 2
 
 
