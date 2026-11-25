@@ -1,15 +1,16 @@
+import calendar
 import logging
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from db import TodoRow, get_session, init_db     # v10.0.0: 저장소를 파일 → DB 로
 
-APP_VERSION = "10.0.0"                           # v10.0.0: todo.json → PostgreSQL
+APP_VERSION = "10.0.0"                           # v10.0.0: todo.json → PostgreSQL, 반복 일정
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
@@ -109,6 +110,9 @@ async def log_requests(request: Request, call_next):
 Priority = Literal["high", "medium", "low"]
 PRIORITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}   # 정렬 순서 (작을수록 앞)
 
+# v10.0.0: 반복 일정. 완료하면 다음 회차가 새 항목으로 생긴다.
+Recurrence = Literal["none", "daily", "weekly", "monthly"]
+
 
 class TodoIn(BaseModel):                         # 클라이언트가 보내는 데이터 (id 없음)
     title: str = Field(min_length=1, max_length=100)
@@ -118,6 +122,15 @@ class TodoIn(BaseModel):                         # 클라이언트가 보내는 
     due_date: date | None = None                 # v2.0.0: 마감일 (없으면 null)
     # v9.0.0: 기본값 medium — 필드가 없는 기존 todo.json 도 그대로 읽힌다(마이그레이션 불필요)
     priority: Priority = "medium"
+    # v10.0.0: 반복 주기. 기본값 none — 필드가 없는 예전 요청·todo.json 도 그대로 받는다
+    recurrence: Recurrence = "none"
+
+    @model_validator(mode="after")
+    def recurring_needs_due_date(self) -> "TodoIn":
+        """다음 회차 날짜를 마감일에서 계산하므로, 반복 일정에는 마감일이 있어야 한다."""
+        if self.recurrence != "none" and self.due_date is None:
+            raise ValueError("반복 일정에는 마감일(due_date)이 필요합니다")
+        return self
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
@@ -140,6 +153,19 @@ async def database_unavailable(request: Request, exc: Exception) -> JSONResponse
                  type(exc).__name__)
     return JSONResponse({"detail": "Database unavailable"}, status_code=503,
                         headers={"Retry-After": "5"})
+
+
+def next_due(due: date, recurrence: str) -> date:
+    """v10.0.0: 다음 회차 마감일.
+
+    매월은 같은 '일' 로 넘기되, 그 달에 그날이 없으면 말일로 맞춘다 (1/31 → 2/28, 윤년 2/29).
+    """
+    if recurrence == "daily":
+        return due + timedelta(days=1)
+    if recurrence == "weekly":
+        return due + timedelta(weeks=1)
+    year, month = (due.year + 1, 1) if due.month == 12 else (due.year, due.month + 1)
+    return due.replace(year=year, month=month, day=min(due.day, calendar.monthrange(year, month)[1]))
 
 
 def to_item(row: TodoRow) -> TodoItem:
@@ -258,12 +284,37 @@ def update_todo(todo_id: int, payload: TodoIn, session: SessionDep) -> TodoItem:
     row = session.get(TodoRow, todo_id, with_for_update=True)   # 커밋까지 행 잠금
     if row is None:
         raise HTTPException(404, NOT_FOUND)
+    was_completed = row.completed
     for field, value in payload.model_dump().items():
         setattr(row, field, value)
-    session.commit()
+    nxt = spawn_next(row) if row.completed and not was_completed else None
+    if nxt is not None:
+        session.add(nxt)
+    session.commit()                             # 완료 처리와 다음 회차 생성은 한 트랜잭션
     todo = to_item(row)
     logger.info("todo updated id=%s title=%r", todo.id, todo.title)
+    if nxt is not None:
+        logger.info("todo repeated id=%s next_id=%s due=%s", todo.id, nxt.id, nxt.due_date)
     return todo
+
+
+def spawn_next(row: TodoRow) -> TodoRow | None:
+    """v10.0.0: 반복 일정을 '방금' 완료했으면 다음 회차를 만든다.
+
+    - 완료된 회차는 반복을 끄고 기록으로만 남긴다. 그래야 체크를 풀었다가 다시 체크해도
+      다음 회차가 또 생기지 않는다 (반복은 언제나 가장 최근 회차 하나만 갖는다).
+    - 마감일이 너무 멀어 다음 날짜를 만들 수 없으면(9999-12-31 근처) 422.
+    """
+    if row.recurrence == "none":
+        return None
+    try:
+        due = next_due(row.due_date, row.recurrence)
+    except (OverflowError, ValueError):
+        raise HTTPException(422, "다음 회차 마감일을 계산할 수 없습니다") from None
+    nxt = TodoRow(title=row.title, description=row.description, priority=row.priority,
+                  recurrence=row.recurrence, due_date=due, completed=False)
+    row.recurrence = "none"
+    return nxt
 
 
 @app.delete(                                     # 삭제

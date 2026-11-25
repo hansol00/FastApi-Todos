@@ -1,8 +1,8 @@
 """db.py — 접속 주소 결정, 엔진 옵션, 기동 시 재시도 (v10.0.0)."""
 
 import pytest
-from sqlalchemy import inspect
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 import db
@@ -140,3 +140,33 @@ def test_sync_id_sequence_is_noop_on_sqlite_or_aligns_postgres(session):
     session.add(db.TodoRow(title="next"))
     session.commit()
     assert max(r.id for r in session.query(db.TodoRow)) == 11
+
+
+#스키마 업그레이드 (v10.0.0: 반복 일정 컬럼)
+
+def test_upgrade_adds_missing_column_to_existing_table(test_engine):
+    """반복 일정 기능 '전' 에 만들어진 todos 테이블(운영 서버)에 컬럼이 추가되고 기존 행은 'none'."""
+    db.Base.metadata.drop_all(test_engine)
+    pk = "SERIAL PRIMARY KEY" if test_engine.dialect.name == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    with test_engine.begin() as conn:
+        conn.execute(text(
+            f"CREATE TABLE todos (id {pk}, title VARCHAR(100) NOT NULL, "
+            "description VARCHAR(500) NOT NULL, completed BOOLEAN NOT NULL, due_date DATE, "
+            "priority VARCHAR(6) NOT NULL)"
+        ))
+        conn.execute(text("INSERT INTO todos (title, description, completed, priority) "
+                          "VALUES ('예전 항목', '', false, 'medium')"))
+
+    db.init_db(test_engine)
+
+    with test_engine.connect() as conn:
+        assert conn.execute(text("SELECT recurrence FROM todos")).scalar_one() == "none"
+    invalid = text("UPDATE todos SET recurrence = 'yearly'")   # CHECK 제약도 함께 붙는다
+    with test_engine.connect() as conn:
+        with pytest.raises(IntegrityError):
+            conn.execute(invalid)
+
+
+def test_upgrade_is_idempotent(test_engine):
+    """이미 최신이면 아무것도 하지 않는다 — 앱이 기동할 때마다 실행되기 때문."""
+    assert db.upgrade_schema(test_engine) == []

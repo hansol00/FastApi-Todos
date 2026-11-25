@@ -237,6 +237,16 @@
             white-space: nowrap;
         }
         .overdue .due { color: #C85B42; background: #FBDDD5; }
+        /* v10.0.0: 반복 일정 표시 — 마감일 배지 옆 */
+        .repeat {
+            display: inline-block;
+            margin-left: .35rem;
+            font-size: .74rem;
+            font-weight: 500;
+            color: #6B4FC9;
+            white-space: nowrap;
+        }
+        .done .repeat { opacity: .55; }
 
         /* v9.0.0: 우선순위 배지 — 기한 지남(코랄)·완료(민트)와 겹치지 않는 색 */
         .prio {
@@ -305,6 +315,13 @@
             <option value="medium" selected>보통</option>
             <option value="low">낮음</option>
         </select>
+        <!-- v10.0.0: 반복 일정. 고르면 완료할 때마다 다음 회차가 자동으로 생긴다 -->
+        <select id="recurrence" aria-label="반복" title="반복 (완료하면 다음 회차가 생김)">
+            <option value="none" selected>반복 안 함</option>
+            <option value="daily">매일</option>
+            <option value="weekly">매주</option>
+            <option value="monthly">매월</option>
+        </select>
         <button type="submit">할 일 추가</button>
     </form>
 
@@ -341,6 +358,7 @@
         let query = "";         // v6.0.0: 검색어 (서버에 ?q= 로 전달)
         let sort = "";          // v9.0.0: 정렬 기준 (서버에 ?sort= 로 전달, 빈 값이면 추가한 순)
         const PRIORITY_LABEL = { high: "높음", medium: "보통", low: "낮음" };
+        const RECURRENCE_LABEL = { none: "반복 안 함", daily: "매일", weekly: "매주", monthly: "매월" };   // v10.0.0
         let selecting = false;  // v8.0.0: 선택 삭제 모드
         let selected = new Set();   // v8.0.0: 선택한 할 일 id
 
@@ -448,6 +466,14 @@
               });
               text.append(due);
             }
+            // v10.0.0: 반복 일정이면 주기를 표시 (완료된 회차는 반복이 꺼져 있어 표시되지 않음)
+            if ((todo.recurrence ?? "none") !== "none") {
+              text.append(Object.assign(document.createElement("small"), {
+                className: "repeat",
+                textContent: `↻ ${RECURRENCE_LABEL[todo.recurrence]}`,
+                title: "완료하면 다음 회차가 생깁니다",
+              }));
+            }
             const li = document.createElement("li");
             li.className = todo.completed ? "is-done" : overdue ? "is-overdue" : "";
             if (selecting) {
@@ -475,8 +501,17 @@
           const picked = answer.trim().toLowerCase();
           const priority = Object.keys(PRIORITY_LABEL).find((k) => k === picked || PRIORITY_LABEL[k] === picked)
             ?? todo.priority ?? "medium";
+          // v10.0.0: 반복 — 없음/매일/매주/매월. 모르는 값이면 기존 값 유지
+          const rAnswer = prompt("반복 (없음 / 매일 / 매주 / 매월):", RECURRENCE_LABEL[todo.recurrence ?? "none"]);
+          if (rAnswer === null) return;
+          const rPicked = rAnswer.trim().toLowerCase().replace("반복 안 함", "없음");
+          const recurrence = rPicked === "없음" ? "none"
+            : Object.keys(RECURRENCE_LABEL).find((k) => k === rPicked || RECURRENCE_LABEL[k] === rPicked)
+              ?? todo.recurrence ?? "none";
+          // 반복에는 마감일이 필요하다 — 비워 두었으면 오늘로 채운다 (서버는 마감일 없는 반복을 422 로 거절)
+          const dueDate = due.trim() || (recurrence !== "none" ? today() : null);
           save(todo.id, {
-            ...todo, title: title.trim(), description: description.trim(), due_date: due.trim() || null, priority,
+            ...todo, title: title.trim(), description: description.trim(), due_date: dueDate, priority, recurrence,
           });
         }
 
@@ -570,11 +605,14 @@
         $("todo-form").onsubmit = (event) => {
           event.preventDefault();
           run("추가", async () => {
+            const recurrence = $("recurrence").value;   // v10.0.0
             await api("/todos", "POST", {
               title: $("title").value.trim(),
               description: $("description").value.trim(),
-              due_date: $("due_date").value || null,
+              // v10.0.0: 반복인데 마감일을 안 고르면 오늘부터 시작
+              due_date: $("due_date").value || (recurrence !== "none" ? today() : null),
               priority: $("priority").value,        // v9.0.0
+              recurrence,
             });
             event.target.reset();
             await load();

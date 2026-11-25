@@ -23,6 +23,7 @@ from sqlalchemy import (
     Integer,
     String,
     create_engine,
+    inspect,
     text,
 )
 from sqlalchemy.exc import OperationalError
@@ -32,6 +33,7 @@ logger = logging.getLogger("todo")
 
 BASE_DIR = Path(__file__).resolve().parent
 PRIORITIES = ("high", "medium", "low")
+RECURRENCES = ("none", "daily", "weekly", "monthly")      # v10.0.0: 반복 일정
 
 
 class Base(DeclarativeBase):
@@ -45,6 +47,7 @@ class TodoRow(Base):
     __table_args__ = (
         # API(pydantic)에서 이미 막지만, DB 에 직접 들어오는 값(psql, 이관 스크립트)도 막는다.
         CheckConstraint(f"priority IN {PRIORITIES}", name="ck_todos_priority"),
+        CheckConstraint(f"recurrence IN {RECURRENCES}", name="ck_todos_recurrence"),
         # SQLite 는 기본적으로 '현재 최대 id + 1' 을 주므로 마지막 항목을 지우면 그 id 가 재사용된다.
         # PostgreSQL 시퀀스는 재사용하지 않는다. 단위 테스트(SQLite)와 운영(PostgreSQL)의 동작을
         # 맞추려고 SQLite 에도 AUTOINCREMENT 를 켠다.
@@ -57,6 +60,8 @@ class TodoRow(Base):
     completed: Mapped[bool] = mapped_column(Boolean, default=False)
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     priority: Mapped[str] = mapped_column(String(6), default="medium")
+    # v10.0.0: 반복 일정. server_default 를 둬야 예전 행(컬럼 추가 전 데이터)도 'none' 으로 채워진다.
+    recurrence: Mapped[str] = mapped_column(String(7), default="none", server_default="none")
 
 
 class AppMeta(Base):
@@ -121,6 +126,31 @@ def get_session() -> Iterator[Session]:
         yield session
 
 
+# v10.0.0: 이미 만들어진 테이블에 나중에 추가한 컬럼.
+#   create_all 은 '없는 테이블' 만 만들고 기존 테이블에 컬럼을 더하지는 않는다.
+#   팀서버·sogang011 의 todos 테이블은 반복 일정 기능 전에 만들어졌으므로 ALTER TABLE 이 필요하다.
+#   (컬럼이 늘어나면 Alembic 같은 마이그레이션 도구로 옮기는 것이 맞다 — 지금은 1개라 직접 처리)
+#   SQL 은 고정 문자열로 둔다 (사용자 입력이 섞이지 않는 DDL 이지만 문자열 조립은 피한다).
+ADDED_COLUMNS = {
+    "recurrence": (
+        "ALTER TABLE todos ADD COLUMN recurrence VARCHAR(7) DEFAULT 'none' NOT NULL "
+        "CONSTRAINT ck_todos_recurrence "
+        "CHECK (recurrence IN ('none', 'daily', 'weekly', 'monthly'))"
+    ),
+}
+
+
+def upgrade_schema(bind: Engine) -> list[str]:
+    """todos 테이블에 빠진 컬럼을 추가하고, 추가한 컬럼 이름을 돌려준다 (여러 번 실행해도 안전)."""
+    existing = {c["name"] for c in inspect(bind).get_columns("todos")}
+    added = [name for name in ADDED_COLUMNS if name not in existing]
+    with bind.begin() as conn:
+        for name in added:
+            conn.execute(text(ADDED_COLUMNS[name]))
+            logger.info("schema upgraded: todos.%s added", name)
+    return added
+
+
 def init_db(bind: Engine | None = None, retries: int = 15, delay: float = 2.0) -> None:
     """테이블이 없으면 만든다. DB 가 아직 뜨는 중이면 잠시 기다렸다 다시 시도한다.
 
@@ -134,11 +164,13 @@ def init_db(bind: Engine | None = None, retries: int = 15, delay: float = 2.0) -
     for attempt in range(1, retries):
         try:
             Base.metadata.create_all(bind)
-            return
+            break
         except OperationalError:
             logger.warning("database not ready (attempt %d/%d), retrying", attempt, retries)
             time.sleep(delay)
-    Base.metadata.create_all(bind)               # 마지막 시도 — 실패하면 예외가 그대로 올라간다
+    else:
+        Base.metadata.create_all(bind)           # 마지막 시도 — 실패하면 예외가 그대로 올라간다
+    upgrade_schema(bind)
 
 
 def sync_id_sequence(session: Session) -> None:

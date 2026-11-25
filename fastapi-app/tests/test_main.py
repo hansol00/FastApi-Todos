@@ -627,3 +627,89 @@ def test_sort_combined_with_filter(mixed_todos):
 
 def test_invalid_sort_rejected(mixed_todos):
     assert client.get("/todos", params={"sort": "title"}).status_code == 422
+
+
+#반복 일정 (v10.0.0)
+
+def complete(todo_id: int, **overrides):
+    """화면의 체크박스처럼 현재 항목을 그대로 보내되 completed 만 바꾼다."""
+    current = next(t for t in load_todos() if t.id == todo_id)
+    body = current.model_dump(mode="json", exclude={"id"}) | {"completed": True} | overrides
+    return client.put(f"/todos/{todo_id}", json=body)
+
+
+def test_recurrence_defaults_to_none():
+    assert client.post("/todos", json={"title": "한 번"}).json()["recurrence"] == "none"
+
+
+def test_recurring_todo_requires_due_date():
+    """다음 회차를 마감일 기준으로 계산하므로, 마감일 없는 반복 일정은 받지 않는다."""
+    response = client.post("/todos", json={"title": "운동", "recurrence": "daily"})
+    assert response.status_code == 422
+    assert "마감일" in response.text
+    assert load_todos() == []
+
+
+def test_invalid_recurrence_rejected():
+    response = client.post("/todos", json={"title": "x", "due_date": "2026-12-01", "recurrence": "yearly"})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(("recurrence", "due", "expected"), [
+    ("daily", "2026-12-31", "2027-01-01"),       # 해가 바뀜
+    ("weekly", "2026-11-25", "2026-12-02"),
+    ("monthly", "2026-11-25", "2026-12-25"),
+    ("monthly", "2026-12-15", "2027-01-15"),     # 12월 → 다음 해 1월
+    ("monthly", "2027-01-31", "2027-02-28"),     # 없는 날짜는 말일로
+    ("monthly", "2028-01-31", "2028-02-29"),     # 윤년
+])
+def test_completing_recurring_todo_creates_next(recurrence, due, expected):
+    created = client.post("/todos", json={
+        "title": "주간 보고", "description": "팀 채널", "priority": "high",
+        "due_date": due, "recurrence": recurrence,
+    }).json()
+    assert complete(created["id"]).status_code == 200
+
+    done, nxt = load_todos()
+    assert (done.completed, done.recurrence) == (True, "none")        # 완료된 회차는 기록으로만
+    assert (nxt.title, nxt.description, nxt.priority) == ("주간 보고", "팀 채널", "high")
+    assert (nxt.completed, nxt.recurrence, nxt.due_date.isoformat()) == (False, recurrence, expected)
+
+
+def test_recheck_does_not_create_duplicate():
+    """체크를 풀었다가 다시 체크해도 다음 회차는 하나만."""
+    tid = client.post("/todos", json={"title": "물 주기", "due_date": "2026-11-25",
+                                      "recurrence": "weekly"}).json()["id"]
+    complete(tid)
+    complete(tid, completed=False)
+    complete(tid)
+    assert len(load_todos()) == 2
+
+
+def test_editing_completed_recurring_todo_does_not_spawn():
+    """이미 완료된 항목을 수정하는 것은 '완료하는 순간' 이 아니다."""
+    save_todos([sample(1, "끝난 일", completed=True, due_date="2026-11-01", recurrence="daily")])
+    assert complete(1, title="제목만 수정").status_code == 200
+    assert [t.id for t in load_todos()] == [1]
+
+
+def test_completing_non_recurring_todo_creates_nothing():
+    save_todos([sample(1, due_date="2026-11-25")])
+    complete(1)
+    assert [t.id for t in load_todos()] == [1]
+
+
+def test_next_occurrence_overflow_is_rejected():
+    """9999-12-31 의 다음 날은 없다 — 500 이 아니라 422, 완료 처리도 되지 않는다."""
+    tid = client.post("/todos", json={"title": "끝", "due_date": "9999-12-31",
+                                      "recurrence": "daily"}).json()["id"]
+    assert complete(tid).status_code == 422
+    assert [(t.completed, t.recurrence) for t in load_todos()] == [(False, "daily")]
+
+
+def test_recurrence_writes_audit_log(caplog):
+    tid = client.post("/todos", json={"title": "x", "due_date": "2026-11-25",
+                                      "recurrence": "daily"}).json()["id"]
+    with caplog.at_level("INFO", logger="todo"):
+        complete(tid)
+    assert f"todo repeated id={tid} next_id={tid + 1} due=2026-11-26" in caplog.text
