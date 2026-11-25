@@ -31,7 +31,7 @@ pipeline {
         // --- DB (v10.0.0) -----------------------------------------------
         DB_CRED               = 'postgres-011-password'  // Secret text. 팀서버 DB 비밀번호
         DB_CONTAINER          = 'postgres-011'
-        DB_IMAGE              = 'postgres:18-alpine'     // docker-compose.yml 과 같은 태그로 맞출 것
+        DB_IMAGE              = 'postgres:18.7-alpine'   // docker-compose.yml 과 같은 태그로 맞출 것
         APP_NET               = 'todo-011-net'           // 팀서버에서 앱 ↔ DB 만 쓰는 네트워크
 
         // --- 부하 테스트 ------------------------------------------------

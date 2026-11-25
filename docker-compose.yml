@@ -41,8 +41,8 @@ services:
     # 18 부터 데이터 경로(PGDATA)가 /var/lib/postgresql/18/docker 로 바뀌었다.
     #   볼륨은 예전처럼 .../data 가 아니라 /var/lib/postgresql 에 붙인다 (공식 이미지 안내).
     # 서버에서 pull 한 뒤 `docker exec postgres-011 postgres --version` 으로 정확한 버전을 확인해
-    # 18-alpine → 18.x-alpine 으로 고정할 것 (#7 의 '이미지 태그는 서버에서 직접 확인' 원칙).
-    image: postgres:18-alpine
+    # 18.7 로 고정함(2026-11-25). 올릴 때도 이렇게 확인한 뒤 Jenkinsfile 의 DB_IMAGE 와 함께 바꿀 것 (#7 의 '이미지 태그는 서버에서 직접 확인' 원칙).
+    image: postgres:18.7-alpine
     container_name: postgres-011
     environment:
       - POSTGRES_DB=todo
