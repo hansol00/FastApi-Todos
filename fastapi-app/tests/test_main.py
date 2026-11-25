@@ -699,12 +699,15 @@ def test_completing_non_recurring_todo_creates_nothing():
     assert [t.id for t in load_todos()] == [1]
 
 
-def test_next_occurrence_overflow_is_rejected():
-    """9999-12-31 의 다음 날은 없다 — 500 이 아니라 422, 완료 처리도 되지 않는다."""
+@pytest.mark.parametrize("recurrence", ["daily", "weekly", "monthly"])
+def test_next_occurrence_overflow_is_rejected(recurrence):
+    """9999-12-31 다음 회차는 없다 — 500 이 아니라 422, 완료 처리도 되지 않는다."""
     tid = client.post("/todos", json={"title": "끝", "due_date": "9999-12-31",
-                                      "recurrence": "daily"}).json()["id"]
-    assert complete(tid).status_code == 422
-    assert [(t.completed, t.recurrence) for t in load_todos()] == [(False, "daily")]
+                                      "recurrence": recurrence}).json()["id"]
+    response = complete(tid)
+    assert response.status_code == 422
+    assert "다음 회차" in response.text
+    assert [(t.completed, t.recurrence) for t in load_todos()] == [(False, recurrence)]
 
 
 def test_recurrence_writes_audit_log(caplog):

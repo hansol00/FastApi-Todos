@@ -165,6 +165,8 @@ def next_due(due: date, recurrence: str) -> date:
     if recurrence == "weekly":
         return due + timedelta(weeks=1)
     year, month = (due.year + 1, 1) if due.month == 12 else (due.year, due.month + 1)
+    if year > date.max.year:                     # daily/weekly 와 같은 예외로 맞춘다
+        raise OverflowError("date value out of range")
     return due.replace(year=year, month=month, day=min(due.day, calendar.monthrange(year, month)[1]))
 
 
@@ -278,7 +280,10 @@ def create_todo(payload: TodoIn, session: SessionDep) -> TodoItem:
 
 @app.put(                                        # 수정
     "/todos/{todo_id}",
-    responses={404: {"description": "To-Do item not found"}},  # v5.1.0: OpenAPI 문서화
+    responses={                                  # v5.1.0: OpenAPI 문서화
+        404: {"description": "To-Do item not found"},
+        422: {"description": "입력 검증 실패, 또는 반복 일정의 다음 회차 마감일을 만들 수 없음"},  # v10.0.0
+    },
 )
 def update_todo(todo_id: int, payload: TodoIn, session: SessionDep) -> TodoItem:
     row = session.get(TodoRow, todo_id, with_for_update=True)   # 커밋까지 행 잠금
@@ -287,7 +292,10 @@ def update_todo(todo_id: int, payload: TodoIn, session: SessionDep) -> TodoItem:
     was_completed = row.completed
     for field, value in payload.model_dump().items():
         setattr(row, field, value)
-    nxt = spawn_next(row) if row.completed and not was_completed else None
+    try:
+        nxt = spawn_next(row) if row.completed and not was_completed else None
+    except OverflowError:
+        raise HTTPException(422, "다음 회차 마감일을 계산할 수 없습니다") from None
     if nxt is not None:
         session.add(nxt)
     session.commit()                             # 완료 처리와 다음 회차 생성은 한 트랜잭션
@@ -303,14 +311,11 @@ def spawn_next(row: TodoRow) -> TodoRow | None:
 
     - 완료된 회차는 반복을 끄고 기록으로만 남긴다. 그래야 체크를 풀었다가 다시 체크해도
       다음 회차가 또 생기지 않는다 (반복은 언제나 가장 최근 회차 하나만 갖는다).
-    - 마감일이 너무 멀어 다음 날짜를 만들 수 없으면(9999-12-31 근처) 422.
+    - 마감일이 너무 멀어 다음 날짜를 만들 수 없으면(9999-12-31 근처) OverflowError → 라우트가 422.
     """
     if row.recurrence == "none":
         return None
-    try:
-        due = next_due(row.due_date, row.recurrence)
-    except (OverflowError, ValueError):
-        raise HTTPException(422, "다음 회차 마감일을 계산할 수 없습니다") from None
+    due = next_due(row.due_date, row.recurrence)
     nxt = TodoRow(title=row.title, description=row.description, priority=row.priority,
                   recurrence=row.recurrence, due_date=due, completed=False)
     row.recurrence = "none"
