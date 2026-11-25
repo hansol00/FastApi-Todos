@@ -24,3 +24,9 @@ jmeter/jmeter.log
 # SonarQube 분석용 커버리지 리포트 (v9.0.0)
 fastapi-app/coverage.xml
 integration_report/
+# v10.0.0: DB 비밀번호 (docker compose 가 읽는 파일 — 절대 커밋하지 않음)
+.env
+# DB_HOST 없이 로컬 실행할 때 생기는 SQLite 파일
+fastapi-app/todo.db
+# Claude 작업 산출물(캡처·보고서 초안) — 저장소에는 올리지 않음
+Claude outputs/

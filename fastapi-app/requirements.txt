@@ -10,3 +10,5 @@ pytest-html==4.2.0
 httpx2==2.16.2            # FastAPI TestClient용 HTTP 클라이언트 (httpx는 deprecated)
 prometheus-fastapi-instrumentator==8.1.0   # v6.0.0: 요청 수·응답시간 자동 수집 (starlette 1.x 지원은 8.x부터)
 prometheus-client==0.26.0                  # v6.0.0: 위 패키지가 쓰는 메트릭 라이브러리
+SQLAlchemy==2.1.9                          # v10.0.0: 저장소 todo.json → DB (ORM·커넥션 풀)
+psycopg[binary]==3.3.9                     # v10.0.0: PostgreSQL 드라이버 (binary: 이미지에 libpq 빌드 불필요)

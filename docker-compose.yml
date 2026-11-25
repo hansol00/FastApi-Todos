@@ -8,8 +8,21 @@ services:
       - "5012:8000"
     environment:
       - DATA_DIR=/app/data
+      # v10.0.0: 저장소를 PostgreSQL 로. 주소는 db.py 의 build_url 이 조립한다.
+      #   호스트 이름은 container_name(postgres-011)이 아니라 서비스 이름(postgres) — #7 의 Prometheus 타깃과 같은 규칙
+      - DB_HOST=postgres
+      - DB_USER=todo
+      - DB_NAME=todo
+      - DB_PASSWORD=${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 를 설정하세요 (.env.example 참고)}
+      # 장애 시 빨리 실패하기 위한 값 (기본값과 같음, 카오스 실험 때 여기서 바꾼다)
+      - DB_POOL_SIZE=5
+      - DB_MAX_OVERFLOW=5
+      - DB_POOL_TIMEOUT=3
     volumes:
-      - todo_data:/app/data
+      - todo_data:/app/data       # v10.0.0: 옛 todo.json — migrate_json.py 로 1회 이관한 뒤에는 읽지 않음
+    depends_on:
+      postgres:
+        condition: service_healthy   # DB 가 질의를 받을 수 있을 때 앱을 띄운다
     restart: unless-stopped       # 서버 재부팅·오류 시 자동 재시작
     healthcheck:                  # v3.0.0: /health 응답으로 컨테이너 상태 판정
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
@@ -21,6 +34,45 @@ services:
       - no-new-privileges:true    # 컨테이너 안에서 권한 상승 차단
     cap_drop:
       - ALL                       # 불필요한 커널 권한 모두 제거
+    networks:
+      - loadtest-net
+
+  postgres:                                     # ← v10.0.0 추가: To-do 저장소
+    # 18 부터 데이터 경로(PGDATA)가 /var/lib/postgresql/18/docker 로 바뀌었다.
+    #   볼륨은 예전처럼 .../data 가 아니라 /var/lib/postgresql 에 붙인다 (공식 이미지 안내).
+    # 서버에서 pull 한 뒤 `docker exec postgres-011 postgres --version` 으로 정확한 버전을 확인해
+    # 18-alpine → 18.x-alpine 으로 고정할 것 (#7 의 '이미지 태그는 서버에서 직접 확인' 원칙).
+    image: postgres:18-alpine
+    container_name: postgres-011
+    environment:
+      - POSTGRES_DB=todo
+      - POSTGRES_USER=todo
+      # 최초 기동(빈 볼륨) 때만 적용된다. 나중에 .env 를 바꿔도 DB 비밀번호는 그대로이므로
+      # 바꾸려면 ALTER USER todo PASSWORD '...'; 를 함께 실행한다.
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 를 설정하세요 (.env.example 참고)}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # -h 127.0.0.1: 초기화 중 임시 서버는 TCP 를 열지 않으므로, 소켓이 아니라 TCP 로 확인해야
+      #   '초기화 끝나고 진짜 서버가 떴을 때' 만 healthy 가 된다.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "todo", "-d", "todo"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:                                    # 엔트리포인트가 데이터 폴더 소유자를 바꾸고 postgres 사용자로 내려갈 때 필요한 것만
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    # ports 없음: 앱과 같은 내부 네트워크로만 접속. 직접 보려면
+    #   docker exec -it postgres-011 psql -U todo -d todo
+    restart: unless-stopped
     networks:
       - loadtest-net
 
@@ -229,6 +281,7 @@ networks:
 
 volumes:                                        # ← 최상위(0칸)로 이동
   todo_data:
+  postgres-data:                                # ← v10.0.0 추가
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:

@@ -3,31 +3,48 @@
 실행: 저장소 루트에서  pytest fastapi-app/tests --cov=main --cov-report=term
 """
 
-import json
 import logging
 import re
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import insert, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 
+import db
 import main
-from main import TodoItem, app, load_todos, save_todos
+from main import TodoItem, app
 
 client = TestClient(app)
 
+# v10.0.0: DB 격리는 conftest.py 의 isolated_db(autouse) 가 맡는다 — 테스트마다 빈 테이블.
 
-@pytest.fixture(autouse=True)
-def isolated_todo_file(tmp_path, monkeypatch):
-    """테스트마다 임시 todo.json 을 쓰도록 바꾼다.
 
-    실제 데이터(fastapi-app/todo.json)를 건드리지 않고, 테스트 간에
-    상태가 새지 않게 격리한다. monkeypatch 와 tmp_path 가 테스트가
-    끝나면 자동으로 되돌리므로 teardown 이 필요 없다. (v5.1.0: 불필요한 yield 제거)
-    """
-    # v5.1.0: save_todos 의 임시 파일과 ensure_todo_file 의 mkdir 도 tmp_path 안에서 일어나야 한다
-    monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(main, "TODO_FILE", tmp_path / "todo.json")
-    save_todos([])
+def save_todos(todos: list[TodoItem]) -> None:
+    """테스트 데이터를 id 그대로 DB 에 넣는다 (v9.0.0 까지의 save_todos 자리)."""
+    with db.SessionLocal() as s:
+        s.add_all(db.TodoRow(**t.model_dump()) for t in todos)
+        s.flush()
+        db.sync_id_sequence(s)                   # PostgreSQL: 직접 넣은 id 다음부터 시퀀스가 이어지게
+        s.commit()
+
+
+def load_todos() -> list[TodoItem]:
+    """DB 에 실제로 저장된 내용을 id 순으로 읽는다 — API 응답이 아니라 저장 결과를 확인할 때."""
+    with db.SessionLocal() as s:
+        return [TodoItem.model_validate(r) for r in s.scalars(select(db.TodoRow).order_by(db.TodoRow.id))]
+
+
+def broken_session_factory(engine):
+    """열 수 없는 경로의 SQLite — DB 서버가 꺼진 것과 같은 OperationalError 를 '진짜로' 일으킨다."""
+    factory = sessionmaker(engine)
+
+    def override():
+        with factory() as session:
+            yield session
+    return override
 
 
 def sample(todo_id: int = 1, title: str = "Test", **kwargs) -> TodoItem:
@@ -61,7 +78,7 @@ def test_create_todo():
     assert response.status_code == 201
     assert response.json()["title"] == "Test"
     assert response.json()["id"] == 1          # id 는 서버가 부여
-    assert len(load_todos()) == 1              # 파일에도 저장됐는지 확인
+    assert len(load_todos()) == 1              # DB 에도 저장됐는지 확인
 
 
 def test_create_todo_assigns_sequential_ids():
@@ -69,6 +86,26 @@ def test_create_todo_assigns_sequential_ids():
     response = client.post("/todos", json={"title": "두 번째"})
     assert response.json()["id"] == 2
     assert [t.id for t in load_todos()] == [1, 2]
+
+
+def test_ids_are_not_reused_after_delete():
+    """v10.0.0: 마지막 항목을 지워도 그 id 를 새 항목에 다시 주지 않는다.
+
+    재사용하면 지우기 전 화면을 보던 사용자가 '삭제' 를 눌렀을 때 새 항목이 지워진다.
+    (SQLite 기본 동작은 재사용 → db.TodoRow 에 sqlite_autoincrement 를 켜서 PostgreSQL 과 맞춤)
+    """
+    client.post("/todos", json={"title": "a"})
+    client.post("/todos", json={"title": "b"})
+    client.delete("/todos/2")
+    assert client.post("/todos", json={"title": "c"}).json()["id"] == 3
+
+
+def test_create_after_seeded_ids_continues_sequence():
+    """id 를 직접 넣은 데이터(이관 등) 뒤에 추가해도 id 가 부딪히지 않는다 (PostgreSQL 시퀀스)."""
+    save_todos([sample(1), sample(5)])
+    response = client.post("/todos", json={"title": "새 항목"})
+    assert response.status_code == 201
+    assert response.json()["id"] == 6
 
 
 def test_create_todo_with_due_date():
@@ -187,42 +224,58 @@ def test_crud_writes_audit_log(caplog):
     assert "todo deleted" in caplog.text
 
 
-#저장소 (load/save_todos)
+#저장소 (v10.0.0: DB)
 
-def test_load_todos_when_file_missing():
-    """파일이 없어도 빈 목록으로 동작해야 한다."""
-    main.TODO_FILE.unlink()
-    assert load_todos() == []
-
-
-def test_saved_file_is_readable_json():
-    """저장 파일이 사람이 읽을 수 있는 UTF-8 JSON 인지 확인."""
-    save_todos([sample(1, "한글 제목")])
-    raw = main.TODO_FILE.read_text(encoding="utf-8")
-    assert "한글 제목" in raw                   # ensure_ascii=False 확인
-    assert json.loads(raw)[0]["id"] == 1
+def test_db_rejects_invalid_priority_directly():
+    """API 를 거치지 않고(psql, 스크립트) 넣는 잘못된 값도 DB CHECK 제약이 막는다."""
+    with db.SessionLocal() as s:
+        with pytest.raises(IntegrityError):
+            s.execute(insert(db.TodoRow).values(title="x", priority="urgent"))
 
 
-def test_save_todos_is_atomic(monkeypatch):
-    """v5.1.0 (H-1): 교체가 실패해도 기존 파일이 온전하고 임시 파일이 남지 않아야 한다."""
-    save_todos([sample(1, "이전 데이터")])
-    original = main.TODO_FILE.read_text(encoding="utf-8")
+def test_search_treats_wildcards_literally():
+    """검색어의 % 와 _ 는 LIKE 와일드카드가 아니라 글자 그대로 찾는다."""
+    save_todos([sample(1, "진행률 100%"), sample(2, "1000원"), sample(3, "a_b"), sample(4, "axb")])
+    assert ids(client.get("/todos", params={"q": "100%"})) == [1]
+    assert ids(client.get("/todos", params={"q": "a_b"})) == [3]
 
-    def fail_replace(src, dst):
-        raise OSError("replace failed")
 
-    # monkeypatch 는 테스트 종료 시 자동 복원된다 (전역 상태를 직접 건드리지 않음)
-    monkeypatch.setattr(main.os, "replace", fail_replace)
+def test_lifespan_initializes_database(monkeypatch):
+    """기동(lifespan) 때 init_db 가 불린다 — 빈 DB 에 테이블이 없어 첫 요청이 실패하는 일을 막는다."""
+    called = []
+    monkeypatch.setattr(main, "init_db", lambda: called.append(True))
+    with TestClient(app):
+        pass
+    assert called == [True]
 
-    # v5.1.0 (python:S5778): 예외를 던질 수 있는 호출이 블록 안에 하나만 있도록 분리
-    new_todos = [sample(2, "새 데이터")]
-    with pytest.raises(OSError):
-        save_todos(new_todos)
 
-    # 교체가 실패했으므로 기존 내용이 그대로 남아 있어야 한다
-    assert main.TODO_FILE.read_text(encoding="utf-8") == original
-    # 임시 파일도 남기지 않아야 한다
-    assert list(main.TODO_FILE.parent.glob(".todo-*.json")) == []
+#DB 장애 (v10.0.0)
+
+def test_api_returns_503_when_database_down(tmp_path, new_engine):
+    """DB 가 꺼지면 500(버그)이 아니라 503 + Retry-After(잠시 후 재시도)."""
+    app.dependency_overrides[db.get_session] = broken_session_factory(new_engine(f"sqlite:///{tmp_path}/no/such/dir/x.db"))
+    for response in (client.get("/todos"), client.post("/todos", json={"title": "x"})):
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "5"
+        assert response.json() == {"detail": "Database unavailable"}   # 내부 정보(경로·SQL) 미노출
+
+
+def test_api_returns_503_when_pool_exhausted(tmp_path, new_engine):
+    """커넥션 풀이 모두 사용 중이면 DB_POOL_TIMEOUT 만큼만 기다리고 503 — 무한정 매달리지 않는다."""
+    engine = new_engine(f"sqlite:///{tmp_path}/pool.db", poolclass=QueuePool,
+                           pool_size=1, max_overflow=0, pool_timeout=0.1)
+    db.Base.metadata.create_all(engine)
+    factory = sessionmaker(engine)
+
+    def override():
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[db.get_session] = override
+    with engine.connect():                       # 하나뿐인 연결을 붙잡아 둔다
+        response = client.get("/todos")
+    assert response.status_code == 503
+    assert client.get("/todos").status_code == 200   # 연결을 돌려주면 바로 회복
 
 
 #헬스체크
@@ -234,29 +287,22 @@ def test_health_ok():
     assert response.status_code == 200
     assert body["status"] == "ok"
     assert body["storage"] == "ok"
+    assert body["database"] in ("sqlite", "postgresql")
     assert body["todo_count"] == 2
     assert body["version"] == main.APP_VERSION
     assert body["uptime_seconds"] >= 0
 
 
-def test_health_degraded_when_file_missing():
-    """데이터 파일이 사라지면 503 으로 트래픽을 거절해야 한다."""
-    main.TODO_FILE.unlink()
+def test_health_degraded_when_database_down(tmp_path, caplog, new_engine):
+    """DB 에 질의가 안 되면 503 으로 트래픽을 거절하되, 예외 원문은 노출하지 않아야 한다."""
+    app.dependency_overrides[db.get_session] = broken_session_factory(new_engine(f"sqlite:///{tmp_path}/no/such/dir/x.db"))
     response = client.get("/health")
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["storage"] == "error"
-
-
-def test_health_degraded_on_corrupt_file(caplog):
-    """JSON 이 깨져 있으면 degraded 로 잡되, 예외 원문은 노출하지 않아야 한다."""
-    main.TODO_FILE.write_text("{ 깨진 JSON", encoding="utf-8")
-    response = client.get("/health")
-    assert response.status_code == 503
-    assert response.json()["storage"] == "error"
     # v5.1.0 (L-1): 예외 상세는 응답이 아니라 서버 로그에만 남는다
     assert "detail" not in response.json()
-    assert "JSONDecodeError" in caplog.text
+    assert "OperationalError" in caplog.text
 
 
 #화면 서빙
@@ -266,21 +312,6 @@ def test_read_root_serves_html():
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
 
-
-#데이터 파일 초기화
-
-def test_ensure_todo_file_creates_missing_file():
-    """파일이 없으면 빈 목록으로 새로 만든다."""
-    main.TODO_FILE.unlink()
-    main.ensure_todo_file()
-    assert main.TODO_FILE.read_text(encoding="utf-8") == "[]"
-
-
-def test_ensure_todo_file_keeps_existing_data():
-    """이미 파일이 있으면 덮어쓰지 않는다."""
-    main.TODO_FILE.write_text('[{"id": 1, "title": "기존 데이터"}]', encoding="utf-8")
-    main.ensure_todo_file()
-    assert "기존 데이터" in main.TODO_FILE.read_text(encoding="utf-8")
 
 #검색·필터 (v6.0.0)
 
@@ -499,10 +530,10 @@ def test_access_log_one_line_per_request(access_log):
 
 def test_access_log_records_500_on_unhandled_error(access_log, monkeypatch):
     """처리 중 예외가 나도 요청이 로그에서 빠지지 않아야 Loki 로 장애를 추적할 수 있다."""
-    def broken():
+    def broken(*args, **kwargs):
         raise RuntimeError("storage down")
 
-    monkeypatch.setattr(main, "load_todos", broken)
+    monkeypatch.setattr(main, "query_todos", broken)
     failing_client = TestClient(app, raise_server_exceptions=False)
     assert failing_client.get("/todos").status_code == 500
 
@@ -540,17 +571,6 @@ def test_update_changes_priority():
     response = client.put("/todos/1", json={"title": "Test", "priority": "low"})
     assert response.json()["priority"] == "low"
     assert load_todos()[0].priority == "low"
-
-
-def test_legacy_data_without_priority_is_readable():
-    """v8.0.0 이전에 저장된 todo.json(priority 없음)도 그대로 읽혀야 한다."""
-    main.TODO_FILE.write_text(
-        '[{"id": 1, "title": "예전 항목", "description": "", "completed": false, "due_date": null}]',
-        encoding="utf-8",
-    )
-    response = client.get("/todos")
-    assert response.status_code == 200
-    assert response.json()[0]["priority"] == "medium"
 
 
 @pytest.fixture

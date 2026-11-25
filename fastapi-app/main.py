@@ -1,20 +1,23 @@
-import json
 import logging
-import os
 import sys
-import tempfile
-import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator   # v6.0.0: 메트릭 수집
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+from sqlalchemy.orm import Session
 
-APP_VERSION = "9.0.0"                            # v9.0.0: 우선순위 + 정렬
+from db import TodoRow, get_session, init_db     # v10.0.0: 저장소를 파일 → DB 로
+
+APP_VERSION = "10.0.0"                           # v10.0.0: todo.json → PostgreSQL
 STARTED_AT = time.monotonic()                    # v3.0.0: 가동 시간(uptime) 계산 기준
 
 logger = logging.getLogger("todo")               # v5.1.0: 감사 로그 (OWASP A09)
@@ -44,27 +47,23 @@ access_logger.propagate = False                  # 상위 로거로 넘겨 두 �
 logging.getLogger("uvicorn.access").disabled = True
 
 BASE_DIR = Path(__file__).resolve().parent       # main.py 가 있는 폴더
-# v4.0.0: 데이터 위치를 환경변수로 분리. 컨테이너에서는 볼륨 경로를 주입한다.
-DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR))
-TODO_FILE = DATA_DIR / "todo.json"
 INDEX_FILE = BASE_DIR / "templates" / "index.html"
 
-# v5.1.0: 읽기-수정-쓰기 구간 직렬화 (OWASP A04, CWE-362 Race Condition)
-#         FastAPI 는 동기(def) 엔드포인트를 스레드풀에서 동시 실행하므로,
-#         잠금이 없으면 두 요청이 같은 목록을 읽고 각자 덮어써 변경이 유실된다.
-_lock = threading.Lock()
+# v10.0.0: v5.1.0 의 threading.Lock 과 원자적 파일 교체(os.replace)는 없앴다.
+#   동시성은 DB 트랜잭션이 맡는다 — 잠금은 프로세스 하나 안에서만 통하므로
+#   uvicorn 워커를 늘리거나 컨테이너를 2개 띄우면 파일 방식은 변경이 유실된다.
+
+SessionDep = Annotated[Session, Depends(get_session)]
 
 
-def ensure_todo_file() -> None:
-    """데이터 파일이 없으면 빈 목록으로 만들어 둔다."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)   # v4.0.0: 볼륨 마운트 경로 대비
-    if not TODO_FILE.exists():
-        TODO_FILE.write_text("[]", encoding="utf-8")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """v10.0.0: 기동 시 테이블 준비 (모듈 최상단에서 하면 import 만 해도 DB 에 붙으려 한다)."""
+    init_db()
+    yield
 
 
-ensure_todo_file()                               # 앱 기동 시 1회
-
-app = FastAPI(title="To-Do List API", version=APP_VERSION)
+app = FastAPI(title="To-Do List API", version=APP_VERSION, lifespan=lifespan)
 
 # v6.0.0: 요청 수·응답 시간을 자동 수집해 /metrics 로 공개한다 (Prometheus 가 수집).
 #   excluded_handlers: /metrics 자신과 헬스체크(30초마다 호출)를 집계에서 빼
@@ -122,64 +121,82 @@ class TodoIn(BaseModel):                         # 클라이언트가 보내는 
 
 
 class TodoItem(TodoIn):                          # 서버가 돌려주는 데이터 (id 있음)
+    model_config = ConfigDict(from_attributes=True)   # v10.0.0: DB 행(TodoRow)에서 바로 변환
     id: int
 
 
-def load_todos() -> list[TodoItem]:
-    raw = TODO_FILE.read_text(encoding="utf-8") if TODO_FILE.exists() else "[]"
-    return [TodoItem(**t) for t in json.loads(raw)]
+NOT_FOUND = "To-Do item not found"
 
 
-def save_todos(todos: list[TodoItem]) -> None:
-    """임시 파일에 먼저 쓴 뒤 원자적으로 교체한다.
-
-    v5.1.0 (OWASP A04): write_text() 는 파일을 먼저 비우므로, 쓰는 도중
-    다른 요청이 읽으면 빈 파일이나 절반만 쓰인 파일을 보게 된다. 쓰는 중
-    프로세스가 중단되면 파일이 영구 손상되어 모든 API 가 500 을 반환한다.
-    os.replace() 는 같은 파일시스템 안에서 원자적으로 동작하므로,
-    읽는 쪽은 언제나 완전한 파일만 보게 된다.
-    """
-    data = json.dumps(
-        [t.model_dump(mode="json") for t in todos], indent=2, ensure_ascii=False
-    )
-    # 교체 대상과 같은 디렉터리여야 os.replace 가 원자적으로 동작한다
-    fd, tmp = tempfile.mkstemp(dir=TODO_FILE.parent, prefix=".todo-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())                 # 디스크까지 내려쓰기
-        os.replace(tmp, TODO_FILE)
-    except BaseException:
-        os.unlink(tmp)                           # 실패 시 임시 파일 정리
-        raise
+# v10.0.0: DB 장애는 500(서버 버그)이 아니라 503(일시적으로 처리 불가)으로 돌려준다.
+#   - OperationalError: DB 가 꺼졌거나 연결이 끊김, statement_timeout 초과
+#   - PoolTimeoutError: 커넥션 풀이 모두 사용 중이라 DB_POOL_TIMEOUT 안에 못 받음
+#   Retry-After 로 클라이언트에게 '잠시 후 다시' 를 알린다. 예외 원문(호스트·SQL)은 응답에
+#   넣지 않고 로그로만 남긴다 (OWASP A05, CWE-209 — /health 와 같은 원칙).
+@app.exception_handler(OperationalError)
+@app.exception_handler(PoolTimeoutError)
+async def database_unavailable(request: Request, exc: Exception) -> JSONResponse:
+    logger.error("database unavailable: %s %s (%s)", request.method, request.url.path,
+                 type(exc).__name__)
+    return JSONResponse({"detail": "Database unavailable"}, status_code=503,
+                        headers={"Retry-After": "5"})
 
 
-def sort_todos(todos: list[TodoItem], sort: str) -> list[TodoItem]:
-    """v9.0.0: 우선순위순 또는 마감일순으로 정렬한다.
+def to_item(row: TodoRow) -> TodoItem:
+    return TodoItem.model_validate(row)
+
+
+def order_by_for(sort: str | None) -> list:
+    """v9.0.0 정렬 규칙을 SQL ORDER BY 로 옮긴 것 (v10.0.0).
 
     - priority: high → medium → low. 같으면 마감일이 빠른 것, 그다음 id 순.
     - due_date: 마감일이 빠른 것부터, 마감일 없는 항목은 맨 뒤. 같으면 우선순위, 그다음 id 순.
+    - 생략: 추가한 순서(id).
     마지막 기준을 id 로 두어 같은 조건이면 언제나 같은 순서가 나오게 한다.
     순서가 요청마다 바뀌면 limit/offset 으로 페이지를 넘길 때 항목이 빠지거나 겹친다.
+    (DB 는 ORDER BY 가 없으면 순서를 보장하지 않는다 — 파일 시절의 '저장된 순서' 같은 건 없다)
+
+    마감일 없음을 맨 뒤로: NULLS LAST 는 DB 마다 기본값이 달라(PostgreSQL ASC 는 NULL 이 뒤,
+    SQLite 는 앞) `due_date IS NULL` 을 먼저 정렬 키로 둬서 두 DB 결과를 같게 만든다.
     """
-    def due_key(t: TodoItem) -> tuple[bool, date]:
-        return (t.due_date is None, t.due_date or date.max)   # None 은 맨 뒤
-
+    rank = case(PRIORITY_RANK, value=TodoRow.priority)
+    due = [TodoRow.due_date.is_(None), TodoRow.due_date]
     if sort == "priority":
-        return sorted(todos, key=lambda t: (PRIORITY_RANK[t.priority], due_key(t), t.id))
-    return sorted(todos, key=lambda t: (due_key(t), PRIORITY_RANK[t.priority], t.id))
+        return [rank, *due, TodoRow.id]
+    if sort == "due_date":
+        return [*due, rank, TodoRow.id]
+    return [TodoRow.id]
 
 
-def find_index(todos: list[TodoItem], todo_id: int) -> int:
-    for i, todo in enumerate(todos):
-        if todo.id == todo_id:
-            return i
-    raise HTTPException(404, "To-Do item not found")
+def query_todos(
+    session: Session,
+    q: str | None = None,
+    completed: bool | None = None,
+    sort: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[TodoItem]:
+    """거르기 → 정렬 → 자르기를 SQL 한 번으로 처리한다 (v10.0.0).
+
+    파일 방식은 매 요청마다 전체를 읽어 파이썬에서 걸렀다. 이제 DB 가 필요한 행만 돌려준다.
+    """
+    stmt = select(TodoRow)
+    if q and (needle := q.strip()):
+        # autoescape: 검색어 속 % 와 _ 를 LIKE 와일드카드가 아닌 글자 그대로 찾는다.
+        #   빠뜨리면 '100%' 검색이 '100' 으로 시작하는 모든 항목에 걸린다.
+        stmt = stmt.where(
+            TodoRow.title.icontains(needle, autoescape=True)
+            | TodoRow.description.icontains(needle, autoescape=True)
+        )
+    if completed is not None:
+        stmt = stmt.where(TodoRow.completed.is_(completed))
+    stmt = stmt.order_by(*order_by_for(sort)).offset(offset).limit(limit)
+    return [to_item(row) for row in session.scalars(stmt)]
 
 
 @app.get("/todos")                               # 목록 조회 — v6.0.0: 검색·상태 필터
 def get_todos(
+    session: SessionDep,
     q: str | None = Query(
         default=None,
         max_length=100,                          # 길이 제한 (OWASP A04, CWE-770)
@@ -215,31 +232,20 @@ def get_todos(
         모든 파라미터가 선택적이라 기존 `GET /todos` 동작은 그대로다.
         le=100 으로 상한을 둔 것은 거르기 전 전체를 요구하는 요청 하나가
         서버를 묶어두지 못하게 하기 위함이다 (OWASP A04, CWE-770).
+    v10.0.0: 같은 순서(거르기 → 정렬 → 자르기)를 SQL 로 옮겼다 → query_todos.
     """
-    todos = load_todos()
-    if q and (needle := q.strip().casefold()):
-        todos = [
-            t for t in todos
-            if needle in t.title.casefold() or needle in t.description.casefold()
-        ]
-    if completed is not None:
-        todos = [t for t in todos if t.completed is completed]
-    if sort:
-        todos = sort_todos(todos, sort)
-    if offset:
-        todos = todos[offset:]
-    if limit is not None:
-        todos = todos[:limit]
-    return todos
+    return query_todos(session, q=q, completed=completed, sort=sort, limit=limit, offset=offset)
 
 
 @app.post("/todos", status_code=201)             # 추가 — id 는 서버가 매긴다
-def create_todo(payload: TodoIn) -> TodoItem:
-    with _lock:                                  # v5.1.0: 읽기-수정-쓰기를 한 덩어리로
-        todos = load_todos()
-        new_id = max((t.id for t in todos), default=0) + 1
-        todo = TodoItem(id=new_id, **payload.model_dump())
-        save_todos(todos + [todo])
+def create_todo(payload: TodoIn, session: SessionDep) -> TodoItem:
+    # v10.0.0: id 는 DB 시퀀스가 매긴다. 지운 id 는 다시 쓰지 않는다 —
+    #   파일 시절(max+1)에는 마지막 항목을 지우면 같은 id 가 새 항목에 붙어,
+    #   오래된 화면에서 '삭제' 를 누르면 엉뚱한 새 항목이 지워질 수 있었다.
+    row = TodoRow(**payload.model_dump())
+    session.add(row)
+    session.commit()
+    todo = to_item(row)
     logger.info("todo created id=%s title=%r priority=%s", todo.id, todo.title, todo.priority)
     return todo
 
@@ -248,13 +254,14 @@ def create_todo(payload: TodoIn) -> TodoItem:
     "/todos/{todo_id}",
     responses={404: {"description": "To-Do item not found"}},  # v5.1.0: OpenAPI 문서화
 )
-def update_todo(todo_id: int, payload: TodoIn) -> TodoItem:
-    with _lock:
-        todos = load_todos()
-        index = find_index(todos, todo_id)       # v5.1.0: 존재 확인을 객체 생성보다 먼저
-        todo = TodoItem(id=todo_id, **payload.model_dump())
-        todos[index] = todo
-        save_todos(todos)
+def update_todo(todo_id: int, payload: TodoIn, session: SessionDep) -> TodoItem:
+    row = session.get(TodoRow, todo_id, with_for_update=True)   # 커밋까지 행 잠금
+    if row is None:
+        raise HTTPException(404, NOT_FOUND)
+    for field, value in payload.model_dump().items():
+        setattr(row, field, value)
+    session.commit()
+    todo = to_item(row)
     logger.info("todo updated id=%s title=%r", todo.id, todo.title)
     return todo
 
@@ -264,11 +271,15 @@ def update_todo(todo_id: int, payload: TodoIn) -> TodoItem:
     status_code=204,
     responses={404: {"description": "To-Do item not found"}},
 )
-def delete_todo(todo_id: int) -> None:
-    with _lock:
-        todos = load_todos()
-        removed = todos.pop(find_index(todos, todo_id))   # 로그에 남길 내용 확보
-        save_todos(todos)
+def delete_todo(todo_id: int, session: SessionDep) -> None:
+    # 조회 후 삭제가 아니라 DELETE ... RETURNING 한 번으로: 두 요청이 동시에 같은 항목을
+    # 지우면 한쪽만 행을 돌려받고, 다른 쪽은 404 가 된다.
+    removed = session.execute(
+        delete(TodoRow).where(TodoRow.id == todo_id).returning(TodoRow.id, TodoRow.title)
+    ).first()
+    if removed is None:
+        raise HTTPException(404, NOT_FOUND)
+    session.commit()
     logger.info("todo deleted id=%s title=%r", removed.id, removed.title)
 
 
@@ -280,6 +291,7 @@ MAX_BULK_DELETE = 100                            # v8.0.0: 한 번에 지울 수
     responses={404: {"description": "없는 id 가 섞여 있음 (아무것도 지우지 않음)"}},
 )
 def delete_selected_todos(
+    session: SessionDep,
     ids: list[int] = Query(
         min_length=1,                            # 빈 요청이 '전부 삭제' 로 오해되지 않게 필수
         max_length=MAX_BULK_DELETE,              # 요청 하나가 서버를 오래 붙잡지 못하게 (OWASP A04, CWE-770)
@@ -295,27 +307,30 @@ def delete_selected_todos(
       화면을 새로 고친 뒤 다시 고르게 한다.
     - 같은 id 가 여러 번 와도 한 번만 지운다.
     - 지운 id 를 감사 로그에 남긴다 → Loki 에서 `|= "todos deleted"` 로 이력 조회.
+
+    v10.0.0: 일단 지워 보고(DELETE ... RETURNING) 지워진 개수가 모자라면 롤백한다.
+      '있는지 확인 → 삭제' 두 단계로 하면 그 사이에 다른 요청이 지웠을 때 일부만 지워진다.
     """
     wanted = list(dict.fromkeys(ids))            # 중복 제거 (순서 유지)
-    with _lock:
-        todos = load_todos()
-        existing = {t.id for t in todos}
-        missing = [i for i in wanted if i not in existing]
-        if missing:
-            raise HTTPException(404, f"To-Do item not found: {missing}")
-        remove = set(wanted)
-        save_todos([t for t in todos if t.id not in remove])
+    deleted = set(session.scalars(
+        delete(TodoRow).where(TodoRow.id.in_(wanted)).returning(TodoRow.id)
+    ))
+    if missing := [i for i in wanted if i not in deleted]:
+        session.rollback()                       # 하나라도 없으면 아무것도 지우지 않는다
+        raise HTTPException(404, f"{NOT_FOUND}: {missing}")
+    session.commit()
     logger.info("todos deleted count=%d ids=%s", len(wanted), wanted)
     return {"deleted": len(wanted), "ids": wanted}
 
 
 @app.get("/health")                              # v3.0.0: 헬스체크 — 컨테이너/로드밸런서가 상태를 확인
-def health_check() -> JSONResponse:
+def health_check(session: SessionDep) -> JSONResponse:
     """서비스가 실제로 일할 수 있는 상태인지 점검한다.
 
     프로세스가 떠 있다는 사실만으로는 정상이라고 볼 수 없으므로,
-    데이터 파일을 실제로 읽고 쓸 수 있는지까지 확인한 뒤 상태를 돌려준다.
+    저장소에 실제로 질의가 되는지까지 확인한 뒤 상태를 돌려준다.
     정상이면 200 OK("ok"), 데이터 저장소에 문제가 있으면 503("degraded").
+    v10.0.0: 파일 읽기·쓰기 권한 확인 → DB 에 COUNT 질의.
     """
     body = {
         "status": "ok",
@@ -324,11 +339,10 @@ def health_check() -> JSONResponse:
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     try:
-        todos = load_todos()                     # 읽기 가능 여부 확인
-        if not os.access(TODO_FILE, os.W_OK):    # 쓰기 권한 확인
-            raise PermissionError(f"{TODO_FILE.name} is not writable")
+        count = session.scalar(select(func.count()).select_from(TodoRow))
         body["storage"] = "ok"
-        body["todo_count"] = len(todos)
+        body["database"] = session.get_bind().dialect.name   # postgresql / sqlite
+        body["todo_count"] = count
     except Exception:                            # 저장소 이상 → 트래픽을 받으면 안 되는 상태
         # v5.1.0 (OWASP A05, CWE-209): 예외 원문에는 서버 절대경로·라이브러리 버전·
         #         저장된 데이터 값이 섞여 나오므로 응답에 넣지 않고 로그로만 남긴다.

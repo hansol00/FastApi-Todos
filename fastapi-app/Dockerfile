@@ -34,7 +34,9 @@ RUN pip install -r requirements.txt
 
 # 소스 복사 — root 소유로 두어 appuser 는 읽기만 가능하게 한다.
 # 앱이 쓰는 경로는 DATA_DIR(/app/data) 하나뿐이고, 그 디렉터리만 appuser 소유다.
-COPY main.py .
+# v10.0.0: 데이터는 PostgreSQL 로 옮겼다. /app/data 는 DB_HOST 가 없을 때의 SQLite 와
+#          옛 todo.json 이관(migrate_json.py) 용으로만 남긴다.
+COPY main.py db.py migrate_json.py ./
 COPY templates/ ./templates/
 
 # 이후 명령은 appuser 권한으로 실행
