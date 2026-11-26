@@ -18,8 +18,6 @@ services:
       - DB_POOL_SIZE=5
       - DB_MAX_OVERFLOW=5
       - DB_POOL_TIMEOUT=3
-    volumes:
-      - todo_data:/app/data       # v10.0.0: 옛 todo.json — migrate_json.py 로 1회 이관한 뒤에는 읽지 않음
     depends_on:
       postgres:
         condition: service_healthy   # DB 가 질의를 받을 수 있을 때 앱을 띄운다
@@ -280,7 +278,6 @@ networks:
     driver: bridge                              # `docker run --network loadtest-net` 로 붙을 수 있다
 
 volumes:                                        # ← 최상위(0칸)로 이동
-  todo_data:
   postgres-data:                                # ← v10.0.0 추가
   sonarqube_data:
   sonarqube_extensions:
